@@ -73,7 +73,8 @@ export class GameEngine {
 		up: false,
 		down: false,
 		jump: false,
-		attack: false
+		attack: false,
+		r: false
 	};
 
 	// Mouse controls
@@ -118,9 +119,20 @@ export class GameEngine {
 	private ladderClimbSpeed = 6; // Units per second - faster for better feel
 	private ladderClimbTarget = 0; // Target height to climb to
 	private ladderStartHeight = 0; // Starting height when climbing begins
+	private ladderClimbStartTime = 0; // Track when climbing started
+	private ladderClimbTimeout = 10; // Maximum time to climb (seconds)
 
 	// Player parts for animations
 	private playerParts: { [key: string]: THREE.Mesh } = {};
+
+	// Building indicator
+	private buildingIndicator: THREE.Mesh | null = null;
+
+	// Anti-stuck system
+	private lastPlayerPosition = new THREE.Vector3();
+	private stuckTimer = 0;
+	private stuckThreshold = 0.1; // Distance threshold for stuck detection
+	private maxStuckTime = 2.0; // Maximum time before auto-unstuck
 
 	constructor(container: HTMLElement) {
 		console.log('GameEngine constructor called');
@@ -900,6 +912,9 @@ export class GameEngine {
 				case 'Escape':
 					this.togglePause();
 					break;
+				case 'KeyR':
+					this.keys.r = true;
+					break;
 			}
 		});
 
@@ -923,6 +938,9 @@ export class GameEngine {
 					break;
 				case 'Space':
 					this.keys.jump = false;
+					break;
+				case 'KeyR':
+					this.keys.r = false;
 					break;
 			}
 		});
@@ -1220,20 +1238,27 @@ export class GameEngine {
 	private checkGroundCollision(delta: number): void {
 		const groundLevel = 1;
 		
+		// Only check ground collision if not on a building and not climbing
+		if (this.isOnBuilding || this.isClimbingLadder) {
+			return;
+		}
+		
 		// Check if player is below ground level and falling
 		if (this.playerGroup.position.y <= groundLevel && this.playerVelocity.y <= 0) {
-			// Only set as on ground if not on a building and not climbing
-			if (!this.isOnBuilding && !this.isClimbingLadder) {
-				this.playerGroup.position.y = groundLevel;
-				this.playerVelocity.y = 0;
-				this.playerOnGround = true;
-				this.isOnBuilding = false;
-				this.currentBuildingHeight = 0;
-			}
+			this.playerGroup.position.y = groundLevel;
+			this.playerVelocity.y = 0;
+			this.playerOnGround = true;
+			this.isOnBuilding = false;
+			this.currentBuildingHeight = 0;
 		}
 	}
 
 	private checkBuildingCollisions(delta: number): void {
+		// Skip building collisions entirely if climbing
+		if (this.isClimbingLadder) {
+			return;
+		}
+		
 		// Update building exit timer
 		if (this.buildingExitTimer > 0) {
 			this.buildingExitTimer -= delta;
@@ -1247,61 +1272,79 @@ export class GameEngine {
 			const playerHeight = this.playerGroup.position.y;
 			const buildingTop = building.height;
 			
-			// Check if player is on top of building - more stable detection with buffer
-			const isOnBuilding = playerHeight > buildingTop - 0.5 && playerHeight < buildingTop + 2.5;
-			const isNearBuilding = distance < 3.0;
+			// IMPROVED BUILDING DETECTION - More generous and reliable
+			const buildingRadius = 4.0; // Increased from 3.0 for better detection
+			const landingHeight = buildingTop + 1.5; // Higher landing point for stability
+			const isNearBuilding = distance < buildingRadius;
+			const isAboveBuilding = playerHeight > buildingTop - 1 && playerHeight < buildingTop + 5;
+			const isOnBuilding = isNearBuilding && isAboveBuilding && this.playerVelocity.y <= 0;
 			
-			// If already on this building, maintain position with buffer
-			if (this.isOnBuilding && this.currentBuildingHeight === buildingTop && distance < 4.0) {
-				// Only maintain position if player is not actively jumping off
+			// CASE 1: Player is already on this building - maintain position
+			if (this.isOnBuilding && this.currentBuildingHeight === buildingTop && distance < buildingRadius + 1) {
+				// Keep player on building unless they're actively jumping off
 				if (this.playerVelocity.y <= 0) {
-					// Keep player on this building with a small buffer to prevent edge glitching
-					this.playerGroup.position.y = buildingTop + 1;
+					this.playerGroup.position.y = landingHeight;
 					this.playerVelocity.y = 0;
 					this.playerOnGround = true;
 					landedOnBuilding = true;
+					
+					// Show building indicator
+					if (!this.buildingIndicator) {
+						this.addBuildingIndicator();
+					}
+					
+					// Debug logging
+					if (Math.random() < 0.01) { // Log occasionally
+						console.log(`Maintaining position on building at height ${buildingTop}, player height: ${playerHeight.toFixed(2)}`);
+					}
 				} else {
-					// Player is jumping off - allow them to leave the building
+					// Player is jumping off - allow them to leave
 					this.isOnBuilding = false;
 					this.currentBuildingHeight = 0;
-					this.buildingExitTimer = 0.5; // Set timer to prevent immediate re-detection
+					this.buildingExitTimer = 0.5;
+					this.removeBuildingIndicator();
 				}
-				return; // Skip other collision checks for this building
+				return; // Skip other checks for this building
 			}
 			
-			// ALWAYS check for building collision regardless of player state
-			if (isNearBuilding && this.buildingExitTimer <= 0) {
-				if (isOnBuilding && distance < 3.5 && this.playerVelocity.y <= 0) {
-					// Player is on top of building - ensure they stay on top (only if not jumping)
-					this.playerGroup.position.y = buildingTop + 1;
-					this.playerVelocity.y = 0;
-					this.playerOnGround = true;
-					this.isOnBuilding = true;
-					this.currentBuildingHeight = buildingTop;
-					landedOnBuilding = true;
-					
-					// Debug: Log successful building landing
-					if (Math.random() < 0.005) { // Only log occasionally
-						console.log(`Landed on building at height ${buildingTop}, player height: ${playerHeight.toFixed(2)}`);
-					}
-				} else if (distance < 2.5) {
-					// Player is colliding with building side - ALWAYS push away
-					const direction = this.playerGroup.position.clone().sub(buildingPos).normalize();
-					this.playerGroup.position.copy(buildingPos.clone().add(direction.multiplyScalar(3)));
-					
-					// Stop player velocity in collision direction
-					const velocity2D = new THREE.Vector3(this.playerVelocity.x, 0, this.playerVelocity.z);
-					const velocityDot = velocity2D.dot(direction);
-					if (velocityDot < 0) {
-						// Only stop velocity if moving toward building
-						this.playerVelocity.x -= direction.x * velocityDot;
-						this.playerVelocity.z -= direction.z * velocityDot;
-					}
+			// CASE 2: Player is landing on a building (not currently on one)
+			if (!this.isOnBuilding && isOnBuilding && this.buildingExitTimer <= 0) {
+				// Land on building
+				this.playerGroup.position.y = landingHeight;
+				this.playerVelocity.y = 0;
+				this.playerOnGround = true;
+				this.isOnBuilding = true;
+				this.currentBuildingHeight = buildingTop;
+				landedOnBuilding = true;
+				
+				// Show building indicator
+				this.addBuildingIndicator();
+				
+				// Add landing effect
+				this.addLandingEffect(this.playerGroup.position.clone());
+				
+				console.log(`Landed on building at height ${buildingTop}! Player height: ${playerHeight.toFixed(2)}, Distance: ${distance.toFixed(2)}`);
+			}
+			
+			// CASE 3: Player is colliding with building side - push away gently
+			else if (isNearBuilding && !isOnBuilding && distance < 2.0) { // Reduced from 2.5
+				const direction = this.playerGroup.position.clone().sub(buildingPos).normalize();
+				// Gentler push - only move player slightly away
+				const pushDistance = 2.5; // Reduced from 3.0
+				this.playerGroup.position.copy(buildingPos.clone().add(direction.multiplyScalar(pushDistance)));
+				
+				// Gentler velocity adjustment
+				const velocity2D = new THREE.Vector3(this.playerVelocity.x, 0, this.playerVelocity.z);
+				const velocityDot = velocity2D.dot(direction);
+				if (velocityDot < 0) {
+					// Only reduce velocity, don't completely stop it
+					this.playerVelocity.x -= direction.x * velocityDot * 0.5;
+					this.playerVelocity.z -= direction.z * velocityDot * 0.5;
 				}
 			}
 			
-			// Check climbing only if not already on a building
-			if (!landedOnBuilding && !this.isOnBuilding) {
+			// CASE 4: Check for climbing only if not on any building
+			if (!landedOnBuilding && !this.isOnBuilding && !this.isClimbingLadder) {
 				this.checkClimbing(building, buildingPos, buildingTop, delta);
 			}
 		});
@@ -1311,10 +1354,11 @@ export class GameEngine {
 			this.checkBuildingToBuildingJumping();
 		}
 		
-		// Reset building state if not on any building and falling (with buffer)
+		// Reset building state if player falls below ground level
 		if (!landedOnBuilding && this.playerGroup.position.y < 0.5) {
 			this.isOnBuilding = false;
 			this.currentBuildingHeight = 0;
+			this.removeBuildingIndicator();
 		}
 	}
 
@@ -1345,16 +1389,15 @@ export class GameEngine {
 			}
 		}
 		
-		// Handle ladder climbing with Space key
+		// Handle ladder climbing with Space key - ONLY START CLIMBING, don't continue here
 		if (this.nearLadder && this.currentLadder === building.ladder) {
 			// Start climbing when Space is pressed and player is near ladder
 			if (this.keys.jump && !this.isClimbingLadder) {
-				this.startClimbing(buildingTop, ladderPos);
-			}
-			
-			// Continue climbing while Space is held
-			if (this.isClimbingLadder && this.keys.jump) {
-				this.continueClimbing(delta, ladderPos);
+				// Validate that we can actually climb this building
+				if (playerHeight < buildingTop + 5) { // Don't climb if already too high
+					console.log('Starting climb from checkClimbing');
+					this.startClimbing(buildingTop, ladderPos);
+				}
 			}
 			
 			// Stop climbing when Space is released
@@ -1374,8 +1417,15 @@ export class GameEngine {
 			const playerHeight = this.playerGroup.position.y;
 			const buildingTop = building.height;
 			
-			// Check if player is jumping toward a building - more generous detection
-			if (distance < 6 && playerHeight > buildingTop - 2 && playerHeight < buildingTop + 4) {
+			// IMPROVED BUILDING-TO-BUILDING JUMPING - More generous detection
+			const jumpDetectionRange = 8.0; // Increased from 6.0
+			const heightRange = 3.0; // Increased from 2.0
+			
+			// Check if player is jumping toward a building
+			if (distance < jumpDetectionRange && 
+				playerHeight > buildingTop - heightRange && 
+				playerHeight < buildingTop + heightRange + 2) {
+				
 				const playerToBuilding = buildingPos.clone().sub(this.playerGroup.position).normalize();
 				const jumpDirection = new THREE.Vector3(this.playerVelocity.x, 0, this.playerVelocity.z).normalize();
 				
@@ -1384,18 +1434,21 @@ export class GameEngine {
 					const dotProduct = jumpDirection.dot(playerToBuilding);
 					
 					// Land on building if jumping toward it - more generous angle
-					if (dotProduct > 0.2) {
-						this.playerGroup.position.y = buildingTop + 1;
+					if (dotProduct > 0.1) { // Reduced from 0.2 for easier landing
+						// Land on building
+						this.playerGroup.position.y = buildingTop + 1.5; // Match landing height
 						this.playerVelocity.y = 0;
 						this.playerOnGround = true;
 						this.isOnBuilding = true;
 						this.currentBuildingHeight = buildingTop;
 						
+						// Show building indicator
+						this.addBuildingIndicator();
+						
 						// Add landing effect
 						this.addLandingEffect(this.playerGroup.position.clone());
 						
-						// Debug: Log successful building-to-building jump
-						console.log(`Building-to-building jump successful! Landed on building at height ${buildingTop}`);
+						console.log(`Building-to-building jump successful! Landed on building at height ${buildingTop}, distance: ${distance.toFixed(2)}`);
 					}
 				}
 			}
@@ -1837,31 +1890,54 @@ export class GameEngine {
 	}
 
 	private startClimbing(buildingTop: number, ladderPos: THREE.Vector3): void {
+		console.log('=== STARTING CLIMB ===');
+		console.log('Building top:', buildingTop);
+		console.log('Ladder position:', ladderPos);
+		console.log('Player position before:', this.playerGroup.position);
+		
+		// Set climbing state FIRST
 		this.isClimbingLadder = true;
 		this.ladderClimbProgress = 0;
 		this.ladderStartHeight = this.playerGroup.position.y;
 		this.ladderClimbTarget = buildingTop + 2; // Climb higher above the roof
+		this.ladderClimbStartTime = this.clock.getElapsedTime(); // Track start time
 		
-		// Disable physics during climbing
+		// IMMEDIATELY disable all physics and collision systems
 		this.playerOnGround = false;
 		this.playerVelocity.set(0, 0, 0); // Stop all movement
 		this.isOnBuilding = false; // Clear building state
 		this.currentBuildingHeight = 0;
 		
-		// Position player at the ladder (outside the building)
+		// IMMEDIATELY position player at the ladder (outside the building)
 		this.playerGroup.position.x = ladderPos.x;
 		this.playerGroup.position.z = ladderPos.z;
+		// Don't change Y position yet - let continueClimbing handle that
 		
 		// Add climbing start effect
 		this.addClimbingEffect(this.playerGroup.position.clone());
+		
+		console.log('Player position after setup:', this.playerGroup.position);
+		console.log('Climbing target height:', this.ladderClimbTarget);
+		console.log('=== CLIMB STARTED ===');
 	}
 
 	private continueClimbing(delta: number, ladderPos: THREE.Vector3): void {
+		// Check for climbing timeout - emergency unstuck
+		const currentTime = this.clock.getElapsedTime();
+		const timeClimbing = currentTime - this.ladderClimbStartTime;
+		
+		if (timeClimbing > this.ladderClimbTimeout) {
+			console.warn('Climbing timeout detected - emergency unstuck');
+			this.emergencyUnstuck(ladderPos);
+			return;
+		}
+		
 		// Calculate how much to climb this frame
 		const climbAmount = this.ladderClimbSpeed * delta;
+		const oldHeight = this.playerGroup.position.y;
+		const newHeight = oldHeight + climbAmount;
 		
-		// Simply add to current height - no complex progress calculations
-		const newHeight = this.playerGroup.position.y + climbAmount;
+		console.log(`Climbing: ${oldHeight.toFixed(2)} -> ${newHeight.toFixed(2)} (target: ${this.ladderClimbTarget.toFixed(2)})`);
 		
 		// Update player position - keep them at the ladder position (outside the building)
 		this.playerGroup.position.y = newHeight;
@@ -1873,6 +1949,7 @@ export class GameEngine {
 		
 		// Check if climbing is complete - climb well above the building
 		if (newHeight >= this.ladderClimbTarget) {
+			console.log('=== CLIMB COMPLETE ===');
 			this.finishClimbing();
 		}
 	}
@@ -1891,6 +1968,9 @@ export class GameEngine {
 	}
 
 	private finishClimbing(): void {
+		console.log('=== FINISHING CLIMB ===');
+		console.log('Player position before finish:', this.playerGroup.position);
+		
 		this.isClimbingLadder = false;
 		this.ladderClimbProgress = 0;
 		
@@ -1915,6 +1995,9 @@ export class GameEngine {
 		this.hideLadderIndicator();
 		this.nearLadder = false;
 		this.currentLadder = null;
+		
+		console.log('Player position after finish:', this.playerGroup.position);
+		console.log('=== CLIMB FINISHED ===');
 	}
 
 	private animate(): void {
@@ -1938,29 +2021,63 @@ export class GameEngine {
 		// Handle input
 		this.handleInput();
 
-		// Update player physics and animation
-		this.updatePlayerPhysics(delta);
-		
-		// Update player animations
-		this.updatePlayerAnimation(delta);
+		// CLIMBING STATE - Completely isolated from other systems
+		if (this.isClimbingLadder) {
+			// Only update climbing logic and camera during climbing
+			if (this.currentLadder) {
+				// Get the ladder position (should be at x + 3.5 from building)
+				const ladderPos = this.currentLadder.position;
+				
+				// Continue climbing only if Space is held
+				if (this.keys.jump) {
+					this.continueClimbing(delta, ladderPos);
+				} else {
+					// Stop climbing if Space is released
+					this.stopClimbing();
+				}
+			}
+			
+			// Update camera during climbing
+			this.updateCamera();
+			
+			// Update climbing animations only
+			this.updatePlayerAnimation(delta);
+			
+			// Safety check for stuck climbing
+			this.checkForStuckClimbing();
+			
+			// Anti-stuck monitoring
+			this.checkForStuckPlayer(delta);
+			
+		} else {
+			// NORMAL GAME STATE - All systems active
+			// Update player physics and animation
+			this.updatePlayerPhysics(delta);
+			
+			// Update player animations
+			this.updatePlayerAnimation(delta);
 
-		// Update character animations
-		this.updateCharacterAnimations(delta);
+			// Update character animations
+			this.updateCharacterAnimations(delta);
 
-		// Update zombies
-		this.updateZombies(delta);
+			// Update zombies
+			this.updateZombies(delta);
 
-		// Update items
-		this.updateItems(delta);
+			// Update items
+			this.updateItems(delta);
+			
+			// Anti-stuck monitoring
+			this.checkForStuckPlayer(delta);
+		}
 
-		// Spawn new zombies
+		// Spawn new zombies (always active)
 		this.zombieSpawnTimer += delta;
 		if (this.zombieSpawnTimer >= this.zombieSpawnInterval / this.difficultyMultiplier) {
 			this.spawnZombie();
 			this.zombieSpawnTimer = 0;
 		}
 
-		// Spawn new items
+		// Spawn new items (always active)
 		this.itemSpawnTimer += delta;
 		if (this.itemSpawnTimer >= this.itemSpawnInterval) {
 			this.spawnItem();
@@ -2039,16 +2156,23 @@ export class GameEngine {
 		this.ladderClimbProgress = 0;
 		this.ladderClimbTarget = 0;
 		this.ladderStartHeight = 0;
+		this.ladderClimbStartTime = 0;
+		this.ladderClimbTimeout = 10;
 		this.hideLadderIndicator();
 
 		// Reset building states
 		this.isOnBuilding = false;
 		this.currentBuildingHeight = 0;
 		this.buildingExitTimer = 0;
+		this.removeBuildingIndicator();
 
 		// Reset physics states
 		this.coyoteTimeCounter = 0;
 		this.jumpBufferCounter = 0;
+		
+		// Reset anti-stuck system
+		this.stuckTimer = 0;
+		this.lastPlayerPosition.copy(this.playerGroup.position);
 
 		// Start animation loop
 		if (!this.animationId) {
@@ -2080,6 +2204,11 @@ export class GameEngine {
 		// Handle attack input
 		if (this.keys.attack) {
 			this.attack();
+		}
+		
+		// Emergency unstuck key (R key)
+		if (this.keys.r) {
+			this.manualUnstuck();
 		}
 	}
 
@@ -2298,10 +2427,44 @@ export class GameEngine {
 	private updatePlayerAnimation(deltaTime: number): void {
 		if (!this.playerParts || !this.playerGroup) return;
 		
+		// CLIMBING ANIMATION - Priority over all other animations
+		if (this.isClimbingLadder) {
+			const climbSpeed = 4; // Slower for more realistic climbing
+			const climbAmplitude = 0.3;
+			const time = this.clock.getElapsedTime();
+			
+			// Alternating arm movement for realistic climbing
+			const leftArmPhase = Math.sin(time * climbSpeed);
+			const rightArmPhase = Math.sin(time * climbSpeed + Math.PI); // Opposite phase
+			
+			// Animate arms for climbing with more realistic motion
+			this.playerParts.leftArm.rotation.x = leftArmPhase * climbAmplitude;
+			this.playerParts.rightArm.rotation.x = rightArmPhase * climbAmplitude;
+			
+			// Add slight arm movement in Z for more realistic climbing
+			this.playerParts.leftArm.rotation.z = leftArmPhase * 0.15;
+			this.playerParts.rightArm.rotation.z = rightArmPhase * 0.15;
+			
+			// Keep legs straight but add slight movement for balance
+			this.playerParts.leftLeg.rotation.x = leftArmPhase * 0.1;
+			this.playerParts.rightLeg.rotation.x = rightArmPhase * 0.1;
+			this.playerParts.leftShoe.rotation.x = this.playerParts.leftLeg.rotation.x;
+			this.playerParts.rightShoe.rotation.x = this.playerParts.rightLeg.rotation.x;
+			
+			// Add slight body movement during climbing
+			this.playerParts.body.rotation.z = Math.sin(time * climbSpeed * 0.5) * 0.05;
+			
+			// Keep body at climbing height
+			this.playerParts.body.position.y = 1.8;
+			
+			return; // Exit early - no other animations during climbing
+		}
+		
+		// NORMAL ANIMATIONS - Only when not climbing
 		// Only animate if player is moving
 		const isMoving = this.keys.up || this.keys.down || this.keys.left || this.keys.right;
 		
-		if (isMoving && !this.isClimbingLadder) {
+		if (isMoving) {
 			// More natural walking animation with better timing
 			const walkSpeed = 6; // Slower for more natural movement
 			const walkAmplitude = 0.25; // Reduced amplitude for subtlety
@@ -2359,33 +2522,201 @@ export class GameEngine {
 			this.playerParts.body.position.y = 1.8;
 			this.playerParts.body.rotation.z *= (1 - idleSpeed);
 		}
+	}
+
+	private emergencyUnstuck(ladderPos: THREE.Vector3): void {
+		// Force finish climbing by setting player to target height
+		this.playerGroup.position.y = this.ladderClimbTarget;
+		this.playerGroup.position.x = ladderPos.x + 2; // Move away from ladder
+		this.playerGroup.position.z = ladderPos.z;
 		
-		// Climbing animation - more realistic climbing motion
-		if (this.isClimbingLadder) {
-			const climbSpeed = 4; // Slower for more realistic climbing
-			const climbAmplitude = 0.3;
-			const time = this.clock.getElapsedTime();
-			
-			// Alternating arm movement for realistic climbing
-			const leftArmPhase = Math.sin(time * climbSpeed);
-			const rightArmPhase = Math.sin(time * climbSpeed + Math.PI); // Opposite phase
-			
-			// Animate arms for climbing with more realistic motion
-			this.playerParts.leftArm.rotation.x = leftArmPhase * climbAmplitude;
-			this.playerParts.rightArm.rotation.x = rightArmPhase * climbAmplitude;
-			
-			// Add slight arm movement in Z for more realistic climbing
-			this.playerParts.leftArm.rotation.z = leftArmPhase * 0.15;
-			this.playerParts.rightArm.rotation.z = rightArmPhase * 0.15;
-			
-			// Keep legs straight but add slight movement for balance
-			this.playerParts.leftLeg.rotation.x = leftArmPhase * 0.1;
-			this.playerParts.rightLeg.rotation.x = rightArmPhase * 0.1;
-			this.playerParts.leftShoe.rotation.x = this.playerParts.leftLeg.rotation.x;
-			this.playerParts.rightShoe.rotation.x = this.playerParts.rightLeg.rotation.x;
-			
-			// Add slight body movement during climbing
-			this.playerParts.body.rotation.z = Math.sin(time * climbSpeed * 0.5) * 0.05;
+		// Reset all climbing state
+		this.isClimbingLadder = false;
+		this.ladderClimbProgress = 0;
+		this.nearLadder = false;
+		this.currentLadder = null;
+		
+		// Re-enable physics
+		this.playerOnGround = true;
+		this.playerVelocity.set(0, 0, 0);
+		this.isOnBuilding = true;
+		this.currentBuildingHeight = this.ladderClimbTarget - 2;
+		
+		// Hide ladder indicator
+		this.hideLadderIndicator();
+		
+		console.log('Emergency unstuck completed - player moved to safe position');
+	}
+
+	private checkForStuckClimbing(): void {
+		// Check if player is stuck in a building
+		if (this.isClimbingLadder && this.currentLadder && this.playerGroup.position.y < this.currentBuildingHeight) {
+			console.warn('Player is stuck in a building - emergency unstuck');
+			this.emergencyUnstuck(this.currentLadder.position);
 		}
+	}
+
+	private manualUnstuck(): void {
+		console.log('Manual unstuck requested');
+		
+		// If climbing, force finish climbing
+		if (this.isClimbingLadder && this.currentLadder) {
+			this.emergencyUnstuck(this.currentLadder.position);
+			return;
+		}
+		
+		// If stuck in a building, move to ground
+		if (this.isOnBuilding && this.playerGroup.position.y > 10) {
+			this.playerGroup.position.y = 1;
+			this.playerOnGround = true;
+			this.isOnBuilding = false;
+			this.currentBuildingHeight = 0;
+			this.playerVelocity.set(0, 0, 0);
+			console.log('Moved player to ground level');
+			return;
+		}
+		
+		// If stuck underground, move to ground
+		if (this.playerGroup.position.y < 0) {
+			this.playerGroup.position.y = 1;
+			this.playerOnGround = true;
+			this.playerVelocity.set(0, 0, 0);
+			console.log('Moved player to ground level');
+			return;
+		}
+		
+		// If stuck in air, move to ground
+		if (!this.playerOnGround && this.playerGroup.position.y > 5) {
+			this.playerGroup.position.y = 1;
+			this.playerOnGround = true;
+			this.playerVelocity.set(0, 0, 0);
+			console.log('Moved player to ground level');
+			return;
+		}
+		
+		console.log('No unstuck action needed');
+	}
+
+	private addBuildingIndicator(): void {
+		// Remove existing indicator
+		if (this.buildingIndicator) {
+			this.scene.remove(this.buildingIndicator);
+		}
+		
+		// Create new indicator
+		const indicatorGeometry = new THREE.RingGeometry(0.8, 1.2, 8);
+		const indicatorMaterial = new THREE.MeshBasicMaterial({ 
+			color: 0x00ff00,
+			transparent: true,
+			opacity: 0.7,
+			side: THREE.DoubleSide
+		});
+		this.buildingIndicator = new THREE.Mesh(indicatorGeometry, indicatorMaterial);
+		this.buildingIndicator.position.copy(this.playerGroup.position);
+		this.buildingIndicator.position.y += 0.1;
+		this.buildingIndicator.rotation.x = -Math.PI / 2;
+		this.scene.add(this.buildingIndicator);
+		
+		// Animate the indicator
+		this.animateBuildingIndicator();
+	}
+	
+	private animateBuildingIndicator(): void {
+		if (!this.buildingIndicator) return;
+		
+		const time = this.clock.getElapsedTime();
+		this.buildingIndicator.position.copy(this.playerGroup.position);
+		this.buildingIndicator.position.y += 0.1;
+		this.buildingIndicator.rotation.z = time * 2;
+		
+		requestAnimationFrame(() => this.animateBuildingIndicator());
+	}
+	
+	private removeBuildingIndicator(): void {
+		if (this.buildingIndicator) {
+			this.scene.remove(this.buildingIndicator);
+			this.buildingIndicator = null;
+		}
+	}
+	
+	private checkForStuckPlayer(delta: number): void {
+		// Skip if player doesn't exist
+		if (!this.playerGroup) return;
+		
+		// Calculate distance moved since last frame
+		const currentPosition = this.playerGroup.position.clone();
+		const distanceMoved = this.lastPlayerPosition.distanceTo(currentPosition);
+		
+		// Check if player is stuck (not moving enough)
+		if (distanceMoved < this.stuckThreshold) {
+			this.stuckTimer += delta;
+			
+			// Log stuck detection
+			if (this.stuckTimer > 0.5 && this.stuckTimer < 0.6) {
+				console.warn(`Player appears to be stuck! Position: ${currentPosition.x.toFixed(2)}, ${currentPosition.y.toFixed(2)}, ${currentPosition.z.toFixed(2)}`);
+			}
+			
+			// Auto-unstuck after max time
+			if (this.stuckTimer > this.maxStuckTime) {
+				console.warn('Auto-unstuck triggered! Moving player to safe position.');
+				this.autoUnstuck();
+				this.stuckTimer = 0;
+			}
+		} else {
+			// Player is moving, reset stuck timer
+			this.stuckTimer = 0;
+		}
+		
+		// Update last position for next frame
+		this.lastPlayerPosition.copy(currentPosition);
+	}
+	
+	private autoUnstuck(): void {
+		if (!this.playerGroup) return;
+		
+		const currentPos = this.playerGroup.position.clone();
+		console.log(`Auto-unstuck: Moving from ${currentPos.x.toFixed(2)}, ${currentPos.y.toFixed(2)}, ${currentPos.z.toFixed(2)}`);
+		
+		// Try to find a safe position
+		let safePosition = null;
+		
+		// Check if we're near a building and can land on it
+		this.buildings.forEach(building => {
+			const buildingPos = building.mesh.position;
+			const distance = currentPos.distanceTo(buildingPos);
+			const buildingTop = building.height;
+			
+			if (distance < 6 && currentPos.y > buildingTop - 2 && currentPos.y < buildingTop + 3) {
+				// Land on this building
+				safePosition = new THREE.Vector3(
+					buildingPos.x + (Math.random() - 0.5) * 2, // Random position on building
+					buildingTop + 1.5,
+					buildingPos.z + (Math.random() - 0.5) * 2
+				);
+			}
+		});
+		
+		// If no building found, move to ground level
+		if (!safePosition) {
+			safePosition = new THREE.Vector3(
+				currentPos.x + (Math.random() - 0.5) * 4, // Random position near current
+				1, // Ground level
+				currentPos.z + (Math.random() - 0.5) * 4
+			);
+		}
+		
+		// Move player to safe position
+		this.playerGroup.position.copy(safePosition);
+		this.playerVelocity.set(0, 0, 0);
+		this.playerOnGround = true;
+		
+		// Reset building state if we moved to ground
+		if (safePosition.y <= 2) {
+			this.isOnBuilding = false;
+			this.currentBuildingHeight = 0;
+			this.removeBuildingIndicator();
+		}
+		
+		console.log(`Auto-unstuck: Moved to ${safePosition.x.toFixed(2)}, ${safePosition.y.toFixed(2)}, ${safePosition.z.toFixed(2)}`);
 	}
 } 
