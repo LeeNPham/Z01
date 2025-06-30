@@ -29,11 +29,16 @@
     "vite": "^5.0.3"
   },
   "dependencies": {
+    "@react-three/cannon": "^6.6.0",
+    "@react-three/drei": "^10.3.0",
+    "@react-three/fiber": "^9.1.4",
+    "@types/three": "^0.160.0",
+    "stats.js": "^0.17.0",
     "three": "^0.160.0",
-    "@types/three": "^0.160.0"
+    "three-stdlib": "^2.36.0"
   },
   "type": "module",
   "engines": {
     "node": "20.x"
   }
-} 
+}

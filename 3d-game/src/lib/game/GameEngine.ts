@@ -1,4 +1,5 @@
 import * as THREE from 'three';
+import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js';
 
 export interface GameState {
 	survivalTime: number;
@@ -24,6 +25,7 @@ interface Building {
 	mesh: THREE.Mesh;
 	climbable: boolean;
 	height: number;
+	ladder?: THREE.Mesh; // Add ladder property
 }
 
 export class GameEngine {
@@ -43,10 +45,14 @@ export class GameEngine {
 	private playerVelocity = new THREE.Vector3();
 	private playerOnGround = true;
 	private playerHealth = 100;
-	private currentWeapon = 'bat'; // Start with baseball bat
-	private weaponMesh: THREE.Group | null = null;
 	private isAttacking = false;
 	private attackCooldown = 0;
+	
+	// Improved jumping system
+	private coyoteTime = 0.1; // Time in seconds you can still jump after leaving ground
+	private coyoteTimeCounter = 0;
+	private jumpBufferTime = 0.1; // Time in seconds to buffer jump input
+	private jumpBufferCounter = 0;
 	
 	// Game mechanics - improved balance
 	private zombieSpawnTimer = 0;
@@ -56,9 +62,9 @@ export class GameEngine {
 	private gameTime = 0;
 	private difficultyMultiplier = 1.0;
 	
-	// Map size - much larger
-	private mapSize = 80; // Increased from 40
-	private mapBounds = 38; // Half of mapSize - 2 for safety
+	// Map size - much larger for impressive cityscape
+	private mapSize = 120; // Increased from 80 for massive city
+	private mapBounds = 58; // Half of mapSize - 2 for safety
 	
 	// Controls
 	private keys = {
@@ -84,43 +90,37 @@ export class GameEngine {
 
 	// Player group and details
 	private playerGroup!: THREE.Group;
-	private leftArmGroup!: THREE.Group;
-	private rightArmGroup!: THREE.Group;
-	private leftLegGroup!: THREE.Group;
-	private rightLegGroup!: THREE.Group;
-	private playerHead!: THREE.Mesh;
-	private playerNeck!: THREE.Mesh;
-	private leftUpperArm!: THREE.Mesh;
-	private rightUpperArm!: THREE.Mesh;
-	private leftLowerArm!: THREE.Mesh;
-	private rightLowerArm!: THREE.Mesh;
-	private leftHand!: THREE.Mesh;
-	private rightHand!: THREE.Mesh;
-	private leftUpperLeg!: THREE.Mesh;
-	private rightUpperLeg!: THREE.Mesh;
-	private leftLowerLeg!: THREE.Mesh;
-	private rightLowerLeg!: THREE.Mesh;
-	private leftFoot!: THREE.Mesh;
-	private rightFoot!: THREE.Mesh;
-	private originalPositions!: {
-		leftUpperArm: THREE.Vector3;
-		rightUpperArm: THREE.Vector3;
-		leftLowerArm: THREE.Vector3;
-		rightLowerArm: THREE.Vector3;
-		leftHand: THREE.Vector3;
-		rightHand: THREE.Vector3;
-		leftUpperLeg: THREE.Vector3;
-		rightUpperLeg: THREE.Vector3;
-		leftLowerLeg: THREE.Vector3;
-		rightLowerLeg: THREE.Vector3;
-		leftFoot: THREE.Vector3;
-		rightFoot: THREE.Vector3;
-	};
 	private animationTime = 0;
 	private isMoving = false;
+	
+	// Character animation system
+	private animationMixer: THREE.AnimationMixer | null = null;
+	private currentAnimation: THREE.AnimationAction | null = null;
+	private animations: { [key: string]: THREE.AnimationAction } = {};
+	private isGLTFLoaded = false;
 
 	// Audio context
 	private audioContext: AudioContext | null = null;
+
+	// State tracking for better collision handling
+	private lastPosition = new THREE.Vector3();
+	private lastVelocity = new THREE.Vector3();
+	private isOnBuilding = false;
+	private currentBuildingHeight = 0;
+	private buildingExitTimer = 0; // Timer to prevent immediate re-detection after jumping off
+	
+	// Ladder interaction system - simplified and intuitive
+	private nearLadder = false;
+	private currentLadder: THREE.Mesh | null = null;
+	private ladderIndicator: THREE.Mesh | null = null;
+	private isClimbingLadder = false;
+	private ladderClimbProgress = 0;
+	private ladderClimbSpeed = 6; // Units per second - faster for better feel
+	private ladderClimbTarget = 0; // Target height to climb to
+	private ladderStartHeight = 0; // Starting height when climbing begins
+
+	// Player parts for animations
+	private playerParts: { [key: string]: THREE.Mesh } = {};
 
 	constructor(container: HTMLElement) {
 		console.log('GameEngine constructor called');
@@ -141,10 +141,6 @@ export class GameEngine {
 		this.initScene(container);
 		console.log('Scene initialized');
 		
-		console.log('Initializing player...');
-		this.initPlayer();
-		console.log('Player initialized');
-		
 		console.log('Initializing city...');
 		this.initCity();
 		console.log('City initialized');
@@ -156,6 +152,15 @@ export class GameEngine {
 		console.log('Initializing event listeners...');
 		this.initEventListeners();
 		console.log('Event listeners initialized');
+		
+		// Initialize player and start animation loop asynchronously
+		this.initializeGame();
+	}
+
+	private async initializeGame(): Promise<void> {
+		console.log('Initializing player...');
+		await this.loadPlayerGLTF();
+		console.log('Player initialized');
 		
 		console.log('Starting animation loop...');
 		this.animate();
@@ -246,331 +251,250 @@ export class GameEngine {
 		}
 	}
 
-	private initPlayer(): void {
-		// Create player group for better organization
-		this.playerGroup = new THREE.Group();
-		this.playerGroup.position.set(0, 1, 0);
-		this.scene.add(this.playerGroup);
-
-		// Player body (torso)
-		const bodyGeometry = new THREE.CapsuleGeometry(0.3, 0.8, 4, 8);
-		const bodyMaterial = new THREE.MeshLambertMaterial({ 
-			color: 0x4169E1,
-			emissive: 0x111122
+	private async loadPlayerGLTF(): Promise<void> {
+		// Try to load GLTF model first, fallback to placeholder if not found
+		const loader = new GLTFLoader();
+		return new Promise((resolve, reject) => {
+			loader.load(
+				'/models/player.glb', // Place your GLB file here
+				gltf => {
+					console.log('GLTF model loaded successfully!');
+					this.playerGroup = gltf.scene;
+					this.scene.add(this.playerGroup);
+					
+					// Set up animation mixer for the character
+					this.setupCharacterAnimations(gltf);
+					
+					// Set initial position
+					this.playerGroup.position.set(0, 1, 0);
+					
+					resolve();
+				},
+				xhr => {
+					// Progress callback
+					console.log(`Loading model: ${(xhr.loaded / xhr.total * 100)}%`);
+				},
+				error => {
+					console.warn('GLTF model not found, creating placeholder player:', error);
+					// Create a temporary placeholder player until we have the GLTF model
+					this.createPlaceholderPlayer();
+					resolve();
+				}
+			);
 		});
+	}
+
+	private setupCharacterAnimations(gltf: any): void {
+		// Set up animation mixer for GLTF character
+		if (gltf.animations && gltf.animations.length > 0) {
+			console.log(`Found ${gltf.animations.length} animations in model`);
+			
+			// Create animation mixer
+			this.animationMixer = new THREE.AnimationMixer(this.playerGroup);
+			this.isGLTFLoaded = true;
+			
+			// Set up animations - look for common animation names
+			gltf.animations.forEach((clip: THREE.AnimationClip, index: number) => {
+				const action = this.animationMixer!.clipAction(clip);
+				this.animations[clip.name.toLowerCase()] = action;
+				
+				// Log available animations
+				console.log(`Animation ${index}: ${clip.name}`);
+			});
+			
+			// Play idle animation by default
+			this.playAnimation('idle') || this.playAnimation('idle_01') || this.playAnimation('idle_02');
+		}
+	}
+
+	private playAnimation(animationName: string): boolean {
+		if (!this.animationMixer || !this.animations[animationName.toLowerCase()]) {
+			return false;
+		}
+		
+		// Stop current animation
+		if (this.currentAnimation) {
+			this.currentAnimation.stop();
+		}
+		
+		// Play new animation
+		this.currentAnimation = this.animations[animationName.toLowerCase()];
+		this.currentAnimation.reset().play();
+		
+		console.log(`Playing animation: ${animationName}`);
+		return true;
+	}
+
+	private updateCharacterAnimations(delta: number): void {
+		// Skip GLTF animations if climbing (use placeholder animations instead)
+		if (this.isClimbingLadder) {
+			return;
+		}
+		
+		// Update GLTF animation mixer if available
+		if (this.animationMixer && this.isGLTFLoaded) {
+			this.animationMixer.update(delta);
+		}
+		
+		// Determine current animation state
+		const isMoving = this.keys.up || this.keys.down || this.keys.left || this.keys.right;
+		
+		// Play appropriate animation based on state
+		if (this.isGLTFLoaded && this.animations) {
+			if (isMoving && !this.playerOnGround) {
+				this.playAnimation('jump');
+			} else if (isMoving && this.playerOnGround) {
+				this.playAnimation('walk');
+			} else if (this.playerOnGround) {
+				this.playAnimation('idle');
+			}
+		}
+	}
+
+	private createPlaceholderPlayer(): void {
+		// Create a detailed placeholder player group with better proportions
+		this.playerGroup = new THREE.Group();
+		
+		// Create a more realistic player body (taller and better proportioned)
+		const bodyGeometry = new THREE.CapsuleGeometry(0.4, 1.8, 4, 8);
+		const bodyMaterial = new THREE.MeshLambertMaterial({ color: 0x2c5aa0 }); // Blue shirt
 		const body = new THREE.Mesh(bodyGeometry, bodyMaterial);
-		body.position.set(0, 0.4, 0);
+		body.position.y = 1.8;
 		body.castShadow = true;
 		this.playerGroup.add(body);
-
-		// Player head
-		const headGeometry = new THREE.SphereGeometry(0.2, 8, 8);
-		const headMaterial = new THREE.MeshLambertMaterial({ 
-			color: 0xFFE4C4,
-			emissive: 0x111111
-		});
+		
+		// Create a better head
+		const headGeometry = new THREE.SphereGeometry(0.25, 8, 6);
+		const headMaterial = new THREE.MeshLambertMaterial({ color: 0xf4d03f }); // Skin tone
 		const head = new THREE.Mesh(headGeometry, headMaterial);
-		head.position.set(0, 1.1, 0);
+		head.position.y = 3.1;
 		head.castShadow = true;
 		this.playerGroup.add(head);
-
-		// Neck
-		const neckGeometry = new THREE.CapsuleGeometry(0.08, 0.15, 4, 6);
-		const neckMaterial = new THREE.MeshLambertMaterial({ 
-			color: 0xFFE4C4,
-			emissive: 0x111111
-		});
-		const neck = new THREE.Mesh(neckGeometry, neckMaterial);
-		neck.position.set(0, 0.95, 0);
-		neck.castShadow = true;
-		this.playerGroup.add(neck);
-
-		// Shoulders
-		const shoulderGeometry = new THREE.CapsuleGeometry(0.12, 0.6, 4, 6);
-		const shoulderMaterial = new THREE.MeshLambertMaterial({ 
-			color: 0x4169E1,
-			emissive: 0x111122
-		});
-		const shoulders = new THREE.Mesh(shoulderGeometry, shoulderMaterial);
-		shoulders.position.set(0, 0.7, 0);
-		shoulders.castShadow = true;
-		this.playerGroup.add(shoulders);
-
-		// Arms with detailed joints
-		this.createDetailedArms();
-
-		// Legs with detailed joints
-		this.createDetailedLegs();
-
-		// Add weapon
-		this.addWeapon('bat');
-	}
-
-	private createDetailedArms(): void {
+		
+		// Create better arms with shoulders
+		const armGeometry = new THREE.CapsuleGeometry(0.12, 1.2, 4, 4);
+		const armMaterial = new THREE.MeshLambertMaterial({ color: 0xf4d03f }); // Skin tone
+		
 		// Left arm
-		const leftArmGroup = new THREE.Group();
-		leftArmGroup.position.set(-0.4, 0.7, 0);
-		this.playerGroup.add(leftArmGroup);
-
-		// Left upper arm
-		const leftUpperArmGeometry = new THREE.CapsuleGeometry(0.08, 0.25, 4, 6);
-		const armMaterial = new THREE.MeshLambertMaterial({ 
-			color: 0xFFE4C4,
-			emissive: 0x111111
-		});
-		const leftUpperArm = new THREE.Mesh(leftUpperArmGeometry, armMaterial);
-		leftUpperArm.position.set(0, -0.125, 0);
-		leftUpperArm.castShadow = true;
-		leftArmGroup.add(leftUpperArm);
-
-		// Left elbow
-		const leftElbowGeometry = new THREE.SphereGeometry(0.09, 6, 6);
-		const elbowMaterial = new THREE.MeshLambertMaterial({ 
-			color: 0xFFE4C4,
-			emissive: 0x111111
-		});
-		const leftElbow = new THREE.Mesh(leftElbowGeometry, elbowMaterial);
-		leftElbow.position.set(0, -0.25, 0);
-		leftElbow.castShadow = true;
-		leftArmGroup.add(leftElbow);
-
-		// Left lower arm
-		const leftLowerArmGeometry = new THREE.CapsuleGeometry(0.07, 0.25, 4, 6);
-		const leftLowerArm = new THREE.Mesh(leftLowerArmGeometry, armMaterial);
-		leftLowerArm.position.set(0, -0.375, 0);
-		leftLowerArm.castShadow = true;
-		leftArmGroup.add(leftLowerArm);
-
-		// Left hand
-		const leftHandGeometry = new THREE.SphereGeometry(0.08, 6, 6);
-		const handMaterial = new THREE.MeshLambertMaterial({ 
-			color: 0xFFE4C4,
-			emissive: 0x111111
-		});
-		const leftHand = new THREE.Mesh(leftHandGeometry, handMaterial);
-		leftHand.position.set(0, -0.5, 0);
-		leftHand.castShadow = true;
-		leftArmGroup.add(leftHand);
-
+		const leftArm = new THREE.Mesh(armGeometry, armMaterial);
+		leftArm.position.set(-0.6, 2.2, 0);
+		leftArm.rotation.z = 0.1; // Slight outward angle
+		leftArm.castShadow = true;
+		this.playerGroup.add(leftArm);
+		
 		// Right arm
-		const rightArmGroup = new THREE.Group();
-		rightArmGroup.position.set(0.4, 0.7, 0);
-		this.playerGroup.add(rightArmGroup);
-
-		// Right upper arm
-		const rightUpperArmGeometry = new THREE.CapsuleGeometry(0.08, 0.25, 4, 6);
-		const rightUpperArm = new THREE.Mesh(rightUpperArmGeometry, armMaterial);
-		rightUpperArm.position.set(0, -0.125, 0);
-		rightUpperArm.castShadow = true;
-		rightArmGroup.add(rightUpperArm);
-
-		// Right elbow
-		const rightElbow = new THREE.Mesh(leftElbowGeometry, elbowMaterial);
-		rightElbow.position.set(0, -0.25, 0);
-		rightElbow.castShadow = true;
-		rightArmGroup.add(rightElbow);
-
-		// Right lower arm
-		const rightLowerArmGeometry = new THREE.CapsuleGeometry(0.07, 0.25, 4, 6);
-		const rightLowerArm = new THREE.Mesh(rightLowerArmGeometry, armMaterial);
-		rightLowerArm.position.set(0, -0.375, 0);
-		rightLowerArm.castShadow = true;
-		rightArmGroup.add(rightLowerArm);
-
-		// Right hand
-		const rightHand = new THREE.Mesh(leftHandGeometry, handMaterial);
-		rightHand.position.set(0, -0.5, 0);
-		rightHand.castShadow = true;
-		rightArmGroup.add(rightHand);
-
-		// Store arm groups for animation
-		this.leftArmGroup = leftArmGroup;
-		this.rightArmGroup = rightArmGroup;
-	}
-
-	private createDetailedLegs(): void {
+		const rightArm = new THREE.Mesh(armGeometry, armMaterial);
+		rightArm.position.set(0.6, 2.2, 0);
+		rightArm.rotation.z = -0.1; // Slight outward angle
+		rightArm.castShadow = true;
+		this.playerGroup.add(rightArm);
+		
+		// Create better legs with pants
+		const legGeometry = new THREE.CapsuleGeometry(0.18, 1.4, 4, 4);
+		const legMaterial = new THREE.MeshLambertMaterial({ color: 0x2c3e50 }); // Dark pants
+		
 		// Left leg
-		const leftLegGroup = new THREE.Group();
-		leftLegGroup.position.set(-0.15, 0, 0);
-		this.playerGroup.add(leftLegGroup);
-
-		// Left upper leg (thigh)
-		const leftUpperLegGeometry = new THREE.CapsuleGeometry(0.1, 0.3, 4, 6);
-		const legMaterial = new THREE.MeshLambertMaterial({ 
-			color: 0x4169E1,
-			emissive: 0x111122
-		});
-		const leftUpperLeg = new THREE.Mesh(leftUpperLegGeometry, legMaterial);
-		leftUpperLeg.position.set(0, -0.15, 0);
-		leftUpperLeg.castShadow = true;
-		leftLegGroup.add(leftUpperLeg);
-
-		// Left knee
-		const leftKneeGeometry = new THREE.SphereGeometry(0.11, 6, 6);
-		const kneeMaterial = new THREE.MeshLambertMaterial({ 
-			color: 0xFFE4C4,
-			emissive: 0x111111
-		});
-		const leftKnee = new THREE.Mesh(leftKneeGeometry, kneeMaterial);
-		leftKnee.position.set(0, -0.3, 0);
-		leftKnee.castShadow = true;
-		leftLegGroup.add(leftKnee);
-
-		// Left lower leg (calf)
-		const leftLowerLegGeometry = new THREE.CapsuleGeometry(0.09, 0.3, 4, 6);
-		const leftLowerLeg = new THREE.Mesh(leftLowerLegGeometry, legMaterial);
-		leftLowerLeg.position.set(0, -0.45, 0);
-		leftLowerLeg.castShadow = true;
-		leftLegGroup.add(leftLowerLeg);
-
-		// Left foot
-		const leftFootGeometry = new THREE.BoxGeometry(0.18, 0.08, 0.25);
-		const footMaterial = new THREE.MeshLambertMaterial({ 
-			color: 0x2F4F4F,
-			emissive: 0x111111
-		});
-		const leftFoot = new THREE.Mesh(leftFootGeometry, footMaterial);
-		leftFoot.position.set(0, -0.6, 0.05);
-		leftFoot.castShadow = true;
-		leftLegGroup.add(leftFoot);
-
+		const leftLeg = new THREE.Mesh(legGeometry, legMaterial);
+		leftLeg.position.set(-0.25, 0.7, 0);
+		leftLeg.castShadow = true;
+		this.playerGroup.add(leftLeg);
+		
 		// Right leg
-		const rightLegGroup = new THREE.Group();
-		rightLegGroup.position.set(0.15, 0, 0);
-		this.playerGroup.add(rightLegGroup);
-
-		// Right upper leg (thigh)
-		const rightUpperLegGeometry = new THREE.CapsuleGeometry(0.1, 0.3, 4, 6);
-		const rightUpperLeg = new THREE.Mesh(rightUpperLegGeometry, legMaterial);
-		rightUpperLeg.position.set(0, -0.15, 0);
-		rightUpperLeg.castShadow = true;
-		rightLegGroup.add(rightUpperLeg);
-
-		// Right knee
-		const rightKnee = new THREE.Mesh(leftKneeGeometry, kneeMaterial);
-		rightKnee.position.set(0, -0.3, 0);
-		rightKnee.castShadow = true;
-		rightLegGroup.add(rightKnee);
-
-		// Right lower leg (calf)
-		const rightLowerLegGeometry = new THREE.CapsuleGeometry(0.09, 0.3, 4, 6);
-		const rightLowerLeg = new THREE.Mesh(rightLowerLegGeometry, legMaterial);
-		rightLowerLeg.position.set(0, -0.45, 0);
-		rightLowerLeg.castShadow = true;
-		rightLegGroup.add(rightLowerLeg);
-
-		// Right foot
-		const rightFoot = new THREE.Mesh(leftFootGeometry, footMaterial);
-		rightFoot.position.set(0, -0.6, 0.05);
-		rightFoot.castShadow = true;
-		rightLegGroup.add(rightFoot);
-
-		// Store leg groups for animation
-		this.leftLegGroup = leftLegGroup;
-		this.rightLegGroup = rightLegGroup;
-	}
-
-	private addWeapon(weaponType: string): void {
-		// Remove existing weapon
-		if (this.weaponMesh) {
-			this.playerGroup.remove(this.weaponMesh);
-		}
-
-		// Create enhanced baseball bat
-		const batGroup = new THREE.Group();
+		const rightLeg = new THREE.Mesh(legGeometry, legMaterial);
+		rightLeg.position.set(0.25, 0.7, 0);
+		rightLeg.castShadow = true;
+		this.playerGroup.add(rightLeg);
 		
-		// Bat handle (wooden)
-		const handleGeometry = new THREE.CylinderGeometry(0.05, 0.05, 0.8, 8);
-		const handleMaterial = new THREE.MeshLambertMaterial({ 
-			color: 0x8B4513 // Brown wood
-		});
-		const handle = new THREE.Mesh(handleGeometry, handleMaterial);
-		handle.position.y = 0.4;
-		batGroup.add(handle);
+		// Add shoes
+		const shoeGeometry = new THREE.BoxGeometry(0.3, 0.15, 0.6);
+		const shoeMaterial = new THREE.MeshLambertMaterial({ color: 0x1a1a1a }); // Black shoes
 		
-		// Bat barrel (thicker part)
-		const barrelGeometry = new THREE.CylinderGeometry(0.15, 0.08, 0.6, 8);
-		const barrelMaterial = new THREE.MeshLambertMaterial({ 
-			color: 0x654321 // Darker brown
-		});
-		const barrel = new THREE.Mesh(barrelGeometry, barrelMaterial);
-		barrel.position.y = 0.8;
-		batGroup.add(barrel);
+		const leftShoe = new THREE.Mesh(shoeGeometry, shoeMaterial);
+		leftShoe.position.set(-0.25, 0.1, 0.1);
+		leftShoe.castShadow = true;
+		this.playerGroup.add(leftShoe);
 		
-		// Bat grip (leather)
-		const gripGeometry = new THREE.CylinderGeometry(0.06, 0.06, 0.2, 8);
-		const gripMaterial = new THREE.MeshLambertMaterial({ 
-			color: 0x2F1B14 // Dark leather
-		});
-		const grip = new THREE.Mesh(gripGeometry, gripMaterial);
-		grip.position.y = 0.1;
-		batGroup.add(grip);
+		const rightShoe = new THREE.Mesh(shoeGeometry, shoeMaterial);
+		rightShoe.position.set(0.25, 0.1, 0.1);
+		rightShoe.castShadow = true;
+		this.playerGroup.add(rightShoe);
 		
-		// Add some texture details
-		const detailGeometry = new THREE.TorusGeometry(0.06, 0.01, 4, 8);
-		const detailMaterial = new THREE.MeshLambertMaterial({ color: 0x1a1a1a });
-		const detail = new THREE.Mesh(detailGeometry, detailMaterial);
-		detail.position.y = 0.2;
-		detail.rotation.x = Math.PI / 2;
-		batGroup.add(detail);
+		// Add simple hair
+		const hairGeometry = new THREE.SphereGeometry(0.28, 6, 4);
+		const hairMaterial = new THREE.MeshLambertMaterial({ color: 0x8b4513 }); // Brown hair
+		const hair = new THREE.Mesh(hairGeometry, hairMaterial);
+		hair.position.y = 3.25;
+		hair.scale.y = 0.8; // Flatten the hair
+		hair.castShadow = true;
+		this.playerGroup.add(hair);
 		
-		// Position the bat in character's right hand - more realistic positioning
-		batGroup.position.set(0.5, 0.2, 0.2); // Positioned near right hand
-		batGroup.rotation.z = -Math.PI / 6; // Slight downward angle
-		batGroup.rotation.y = Math.PI / 8; // Slight outward angle
-		batGroup.rotation.x = Math.PI / 12; // Slight forward tilt
+		// Store references for animations
+		this.playerParts = {
+			leftArm,
+			rightArm,
+			leftLeg,
+			rightLeg,
+			leftShoe,
+			rightShoe,
+			body
+		};
 		
-		this.weaponMesh = batGroup;
-		this.playerGroup.add(batGroup);
+		// Set initial position - properly on the ground
+		this.playerGroup.position.set(0, 1, 0);
+		
+		// Add to scene
+		this.scene.add(this.playerGroup);
+		
+		console.log('Detailed placeholder player created successfully');
 	}
 
 	private initCity(): void {
-		// Create much larger city with taller buildings
+		// Create massive city with huge buildings - impressive scale
 		const buildingPositions = [
-			// Downtown area - tall skyscrapers
-			{ x: -15, z: -15, height: 12, climbable: true, type: 'skyscraper' },
-			{ x: 15, z: -15, height: 15, climbable: true, type: 'skyscraper' },
-			{ x: -15, z: 15, height: 10, climbable: true, type: 'skyscraper' },
-			{ x: 15, z: 15, height: 18, climbable: true, type: 'skyscraper' },
-			{ x: 0, z: -20, height: 14, climbable: true, type: 'skyscraper' },
-			{ x: -20, z: 0, height: 16, climbable: true, type: 'skyscraper' },
-			{ x: 20, z: 0, height: 13, climbable: true, type: 'skyscraper' },
+			// Downtown area - massive skyscrapers with strategic spacing
+			{ x: -30, z: -30, height: 35, climbable: true, type: 'skyscraper' },
+			{ x: 30, z: -30, height: 42, climbable: true, type: 'skyscraper' },
+			{ x: -30, z: 30, height: 28, climbable: true, type: 'skyscraper' },
+			{ x: 30, z: 30, height: 45, climbable: true, type: 'skyscraper' },
+			{ x: 0, z: -40, height: 38, climbable: true, type: 'skyscraper' },
+			{ x: -40, z: 0, height: 32, climbable: true, type: 'skyscraper' },
+			{ x: 40, z: 0, height: 25, climbable: true, type: 'skyscraper' },
 			
-			// Mid-rise buildings
-			{ x: -10, z: -10, height: 6, climbable: true, type: 'office' },
-			{ x: 10, z: -10, height: 8, climbable: true, type: 'apartment' },
-			{ x: -10, z: 10, height: 5, climbable: false, type: 'shop' },
-			{ x: 10, z: 10, height: 7, climbable: true, type: 'office' },
-			{ x: -5, z: -25, height: 6, climbable: true, type: 'apartment' },
-			{ x: 5, z: -25, height: 9, climbable: true, type: 'office' },
-			{ x: -25, z: -5, height: 7, climbable: true, type: 'apartment' },
-			{ x: 25, z: -5, height: 5, climbable: false, type: 'shop' },
-			{ x: -25, z: 5, height: 8, climbable: true, type: 'office' },
-			{ x: 25, z: 5, height: 6, climbable: true, type: 'apartment' },
+			// Mid-rise buildings - well-spaced for parkour opportunities
+			{ x: -18, z: -18, height: 20, climbable: true, type: 'office' },
+			{ x: 18, z: -18, height: 24, climbable: true, type: 'apartment' },
+			{ x: -18, z: 18, height: 16, climbable: false, type: 'shop' },
+			{ x: 18, z: 18, height: 22, climbable: true, type: 'office' },
+			{ x: -12, z: -28, height: 18, climbable: true, type: 'apartment' },
+			{ x: 12, z: -28, height: 26, climbable: true, type: 'office' },
+			{ x: -28, z: -12, height: 21, climbable: true, type: 'apartment' },
+			{ x: 28, z: -12, height: 15, climbable: false, type: 'shop' },
+			{ x: -28, z: 12, height: 23, climbable: true, type: 'office' },
+			{ x: 28, z: 12, height: 19, climbable: true, type: 'apartment' },
 			
-			// Residential area - smaller buildings
-			{ x: -30, z: -30, height: 4, climbable: true, type: 'house' },
-			{ x: 30, z: -30, height: 3, climbable: true, type: 'house' },
-			{ x: -30, z: 30, height: 4, climbable: true, type: 'house' },
-			{ x: 30, z: 30, height: 3, climbable: true, type: 'house' },
-			{ x: -35, z: 0, height: 4, climbable: true, type: 'house' },
-			{ x: 35, z: 0, height: 3, climbable: true, type: 'house' },
-			{ x: 0, z: -35, height: 4, climbable: true, type: 'house' },
-			{ x: 0, z: 35, height: 3, climbable: true, type: 'house' },
+			// Residential area - medium buildings with good spacing
+			{ x: -50, z: -50, height: 12, climbable: true, type: 'house' },
+			{ x: 50, z: -50, height: 10, climbable: true, type: 'house' },
+			{ x: -50, z: 50, height: 11, climbable: true, type: 'house' },
+			{ x: 50, z: 50, height: 9, climbable: true, type: 'house' },
+			{ x: -55, z: 0, height: 13, climbable: true, type: 'house' },
+			{ x: 55, z: 0, height: 8, climbable: true, type: 'house' },
+			{ x: 0, z: -55, height: 14, climbable: true, type: 'house' },
+			{ x: 0, z: 55, height: 7, climbable: true, type: 'house' },
 			
-			// Additional mid-rise buildings for more exploration
-			{ x: -8, z: 20, height: 6, climbable: true, type: 'apartment' },
-			{ x: 8, z: 20, height: 5, climbable: false, type: 'shop' },
-			{ x: -20, z: -8, height: 7, climbable: true, type: 'office' },
-			{ x: 20, z: -8, height: 6, climbable: true, type: 'apartment' },
-			{ x: -20, z: 8, height: 5, climbable: false, type: 'shop' },
-			{ x: 20, z: 8, height: 8, climbable: true, type: 'office' },
+			// Additional mid-rise buildings for more exploration - strategic positioning
+			{ x: -9, z: 24, height: 19, climbable: true, type: 'apartment' },
+			{ x: 9, z: 24, height: 13, climbable: false, type: 'shop' },
+			{ x: -24, z: -9, height: 20, climbable: true, type: 'office' },
+			{ x: 24, z: -9, height: 17, climbable: true, type: 'apartment' },
+			{ x: -24, z: 9, height: 14, climbable: false, type: 'shop' },
+			{ x: 24, z: 9, height: 25, climbable: true, type: 'office' },
 			
-			// Corner buildings for strategic positions
-			{ x: -12, z: -12, height: 9, climbable: true, type: 'office' },
-			{ x: 12, z: -12, height: 7, climbable: true, type: 'apartment' },
-			{ x: -12, z: 12, height: 6, climbable: false, type: 'shop' },
-			{ x: 12, z: 12, height: 10, climbable: true, type: 'office' }
+			// Strategic corner buildings for parkour routes
+			{ x: -21, z: -21, height: 27, climbable: true, type: 'office' },
+			{ x: 21, z: -21, height: 18, climbable: true, type: 'apartment' },
+			{ x: -21, z: 21, height: 16, climbable: false, type: 'shop' },
+			{ x: 21, z: 21, height: 29, climbable: true, type: 'office' }
 		];
 
 		buildingPositions.forEach(pos => {
@@ -588,12 +512,12 @@ export class GameEngine {
 	}
 
 	private addRooftopStructures(): void {
-		// Add some rooftop structures for more vertical gameplay
+		// Add some rooftop structures for more vertical gameplay - updated for massive buildings
 		const rooftopPositions = [
-			{ x: -15, z: -15, height: 12, type: 'antenna' },
-			{ x: 15, z: -15, height: 15, type: 'water_tank' },
-			{ x: -15, z: 15, height: 10, type: 'antenna' },
-			{ x: 15, z: 15, height: 18, type: 'helicopter_pad' }
+			{ x: -30, z: -30, height: 35, type: 'antenna' },
+			{ x: 30, z: -30, height: 42, type: 'water_tank' },
+			{ x: -30, z: 30, height: 28, type: 'antenna' },
+			{ x: 30, z: 30, height: 45, type: 'helicopter_pad' }
 		];
 
 		rooftopPositions.forEach(pos => {
@@ -645,8 +569,8 @@ export class GameEngine {
 	private createBuilding(buildingData: any): void {
 		const { x, z, height, climbable, type } = buildingData;
 		
-		// Main building structure
-		const buildingGeometry = new THREE.BoxGeometry(2, height, 2);
+		// Main building structure - much larger for impressive scale
+		const buildingGeometry = new THREE.BoxGeometry(4, height, 4); // Increased from 2x2 to 4x4
 		const buildingMaterial = new THREE.MeshLambertMaterial({ 
 			color: this.getBuildingColor(type)
 		});
@@ -659,11 +583,73 @@ export class GameEngine {
 		// Add building details
 		this.addBuildingDetails(building, type, height);
 
+		// Add ladder if building is climbable
+		let ladder: THREE.Mesh | undefined;
+		if (climbable) {
+			ladder = this.createLadder(x, z, height);
+		}
+
 		this.buildings.push({
 			mesh: building,
 			climbable: climbable,
-			height: height
+			height: height,
+			ladder: ladder
 		});
+	}
+
+	private createLadder(x: number, z: number, buildingHeight: number): THREE.Mesh {
+		// Create ladder geometry - much larger for 4x4 buildings
+		const ladderGroup = new THREE.Group();
+		
+		// Ladder sides (vertical rails) - much larger and more visible
+		const railGeometry = new THREE.BoxGeometry(0.2, buildingHeight, 0.2); // Doubled size
+		const railMaterial = new THREE.MeshLambertMaterial({ 
+			color: 0x666666,
+			emissive: 0x444444
+		}); // Brighter and more visible
+		
+		const leftRail = new THREE.Mesh(railGeometry, railMaterial);
+		leftRail.position.set(-1.2, buildingHeight / 2, 0); // Wider spacing
+		ladderGroup.add(leftRail);
+		
+		const rightRail = new THREE.Mesh(railGeometry, railMaterial);
+		rightRail.position.set(1.2, buildingHeight / 2, 0); // Wider spacing
+		ladderGroup.add(rightRail);
+		
+		// Ladder rungs (horizontal steps) - much larger and more visible
+		const rungGeometry = new THREE.BoxGeometry(2.4, 0.15, 0.15); // Much larger rungs
+		const rungMaterial = new THREE.MeshLambertMaterial({ 
+			color: 0x888888,
+			emissive: 0x555555
+		}); // Bright and glowing
+		
+		const rungCount = Math.floor(buildingHeight / 1.5); // More rungs for easier climbing
+		for (let i = 0; i < rungCount; i++) {
+			const rung = new THREE.Mesh(rungGeometry, rungMaterial);
+			rung.position.set(0, (i + 1) * 1.5, 0);
+			ladderGroup.add(rung);
+		}
+		
+		// Add a much more visible glow effect around the ladder
+		const glowGeometry = new THREE.BoxGeometry(3, buildingHeight + 1, 1);
+		const glowMaterial = new THREE.MeshBasicMaterial({ 
+			color: 0x00ff00,
+			transparent: true,
+			opacity: 0.3, // More visible
+			side: THREE.DoubleSide
+		});
+		const glow = new THREE.Mesh(glowGeometry, glowMaterial);
+		glow.position.set(0, buildingHeight / 2, 0);
+		ladderGroup.add(glow);
+		
+		// Position ladder properly outside the 4x4 building - much further out
+		ladderGroup.position.set(x + 3.5, 0, z); // Much further from building to avoid collision
+		ladderGroup.rotation.y = Math.PI / 2; // Rotate 90 degrees to face outward from building
+		ladderGroup.castShadow = true;
+		this.scene.add(ladderGroup);
+		
+		// Return the ladder group as a single mesh for collision detection
+		return ladderGroup as any;
 	}
 
 	private getBuildingColor(type: string): number {
@@ -678,41 +664,45 @@ export class GameEngine {
 	}
 
 	private addBuildingDetails(building: THREE.Mesh, type: string, height: number): void {
-		// Add windows
-		const windowGeometry = new THREE.PlaneGeometry(0.3, 0.4);
+		// Add windows - scaled for larger buildings
+		const windowGeometry = new THREE.PlaneGeometry(0.6, 0.8); // Larger windows for bigger buildings
 		const windowMaterial = new THREE.MeshLambertMaterial({ 
 			color: 0x87ceeb,
 			emissive: 0x111111
 		});
 
-		// Add windows on each side
+		// Add windows on each side - multiple windows per side for larger buildings
 		for (let y = 0.5; y < height - 0.5; y += 0.8) {
-			// Front windows
-			const frontWindow = new THREE.Mesh(windowGeometry, windowMaterial);
-			frontWindow.position.set(0, y, 1.01);
-			building.add(frontWindow);
+			// Front windows - multiple windows per side
+			for (let x = -1.5; x <= 1.5; x += 1.5) {
+				const frontWindow = new THREE.Mesh(windowGeometry, windowMaterial);
+				frontWindow.position.set(x, y, 2.01);
+				building.add(frontWindow);
 
-			// Back windows
-			const backWindow = new THREE.Mesh(windowGeometry, windowMaterial);
-			backWindow.position.set(0, y, -1.01);
-			backWindow.rotation.y = Math.PI;
-			building.add(backWindow);
+				// Back windows
+				const backWindow = new THREE.Mesh(windowGeometry, windowMaterial);
+				backWindow.position.set(x, y, -2.01);
+				backWindow.rotation.y = Math.PI;
+				building.add(backWindow);
+			}
 
-			// Side windows
-			const leftWindow = new THREE.Mesh(windowGeometry, windowMaterial);
-			leftWindow.position.set(-1.01, y, 0);
-			leftWindow.rotation.y = Math.PI / 2;
-			building.add(leftWindow);
+			// Side windows - multiple windows per side
+			for (let z = -1.5; z <= 1.5; z += 1.5) {
+				const leftWindow = new THREE.Mesh(windowGeometry, windowMaterial);
+				leftWindow.position.set(-2.01, y, z);
+				leftWindow.rotation.y = Math.PI / 2;
+				building.add(leftWindow);
 
-			const rightWindow = new THREE.Mesh(windowGeometry, windowMaterial);
-			rightWindow.position.set(1.01, y, 0);
-			rightWindow.rotation.y = -Math.PI / 2;
-			building.add(rightWindow);
+				const rightWindow = new THREE.Mesh(windowGeometry, windowMaterial);
+				rightWindow.position.set(2.01, y, z);
+				rightWindow.rotation.y = -Math.PI / 2;
+				building.add(rightWindow);
+			}
 		}
 
 		// Add roof details for taller buildings
 		if (height > 3) {
-			const roofGeometry = new THREE.BoxGeometry(2.2, 0.2, 2.2);
+			const roofGeometry = new THREE.BoxGeometry(4.2, 0.2, 4.2); // Larger roof for bigger buildings
 			const roofMaterial = new THREE.MeshLambertMaterial({ color: 0x333333 });
 			const roof = new THREE.Mesh(roofGeometry, roofMaterial);
 			roof.position.y = height / 2 + 0.1;
@@ -721,18 +711,23 @@ export class GameEngine {
 	}
 
 	private addStreetLights(): void {
-		// Add street lights throughout the larger map
+		// Add street lights throughout the massive map - updated for new building layout
 		const lightPositions = [
-			// Main intersections
-			{ x: -10, z: -10 }, { x: 10, z: -10 }, { x: -10, z: 10 }, { x: 10, z: 10 },
-			{ x: -20, z: -20 }, { x: 20, z: -20 }, { x: -20, z: 20 }, { x: 20, z: 20 },
-			{ x: 0, z: -15 }, { x: 0, z: 15 }, { x: -15, z: 0 }, { x: 15, z: 0 },
-			
-			// Additional lights for better coverage
-			{ x: -5, z: -25 }, { x: 5, z: -25 }, { x: -25, z: -5 }, { x: 25, z: -5 },
-			{ x: -25, z: 5 }, { x: 25, z: 5 }, { x: -5, z: 25 }, { x: 5, z: 25 },
+			// Main intersections - updated for new building positions
+			{ x: -18, z: -18 }, { x: 18, z: -18 }, { x: -18, z: 18 }, { x: 18, z: 18 },
 			{ x: -30, z: -30 }, { x: 30, z: -30 }, { x: -30, z: 30 }, { x: 30, z: 30 },
-			{ x: -35, z: 0 }, { x: 35, z: 0 }, { x: 0, z: -35 }, { x: 0, z: 35 }
+			{ x: 0, z: -40 }, { x: 0, z: 40 }, { x: -40, z: 0 }, { x: 40, z: 0 },
+			
+			// Additional lights for better coverage - updated positions
+			{ x: -12, z: -28 }, { x: 12, z: -28 }, { x: -28, z: -12 }, { x: 28, z: -12 },
+			{ x: -28, z: 12 }, { x: 28, z: 12 }, { x: -12, z: 28 }, { x: 12, z: 28 },
+			{ x: -50, z: -50 }, { x: 50, z: -50 }, { x: -50, z: 50 }, { x: 50, z: 50 },
+			{ x: -55, z: 0 }, { x: 55, z: 0 }, { x: 0, z: -55 }, { x: 0, z: 55 },
+			
+			// Strategic lighting for parkour routes
+			{ x: -21, z: -21 }, { x: 21, z: -21 }, { x: -21, z: 21 }, { x: 21, z: 21 },
+			{ x: -9, z: 24 }, { x: 9, z: 24 }, { x: -24, z: -9 }, { x: 24, z: -9 },
+			{ x: -24, z: 9 }, { x: 24, z: 9 }
 		];
 
 		lightPositions.forEach(pos => {
@@ -978,48 +973,89 @@ export class GameEngine {
 		// Touch controls for mobile
 		let touchStartX = 0;
 		let touchStartY = 0;
+		let isJumping = false;
 
 		document.addEventListener('touchstart', (event) => {
 			event.preventDefault();
 			const touch = event.touches[0];
 			touchStartX = touch.clientX;
 			touchStartY = touch.clientY;
+			
+			// Check if this is a jump gesture (swipe up)
+			if (event.touches.length === 1) {
+				// Single touch - could be movement or jump
+				isJumping = false;
+			}
+		});
+
+		document.addEventListener('touchmove', (event) => {
+			event.preventDefault();
+			if (event.touches.length === 1) {
+				const touch = event.touches[0];
+				const deltaX = touch.clientX - touchStartX;
+				const deltaY = touch.clientY - touchStartY;
+				const threshold = 20;
+
+				// Handle movement
+				if (Math.abs(deltaX) > threshold) {
+					if (deltaX > 0) {
+						this.keys.right = true;
+						this.keys.left = false;
+					} else {
+						this.keys.left = true;
+						this.keys.right = false;
+					}
+				} else {
+					this.keys.left = false;
+					this.keys.right = false;
+				}
+
+				if (Math.abs(deltaY) > threshold) {
+					if (deltaY > 0) {
+						this.keys.down = true;
+						this.keys.up = false;
+					} else {
+						this.keys.up = true;
+						this.keys.down = false;
+						// Upward swipe triggers jump
+						if (!isJumping) {
+							this.keys.jump = true;
+							isJumping = true;
+						}
+					}
+				} else {
+					this.keys.up = false;
+					this.keys.down = false;
+				}
+			}
 		});
 
 		document.addEventListener('touchend', (event) => {
 			event.preventDefault();
+			
+			// Only reset keys if no touches remain
+			if (event.touches.length === 0) {
+				// Reset movement keys but keep jump if it was just triggered
+				this.keys.left = false;
+				this.keys.right = false;
+				this.keys.up = false;
+				this.keys.down = false;
+				
+				// Keep jump active for a short time to ensure it registers
+				if (this.keys.jump) {
+					setTimeout(() => {
+						this.keys.jump = false;
+						isJumping = false;
+					}, 100);
+				}
+			}
+			
+			// Handle tap to attack
 			const touch = event.changedTouches[0];
 			const deltaX = touch.clientX - touchStartX;
 			const deltaY = touch.clientY - touchStartY;
 			const threshold = 30;
-
-			// Reset all keys
-			this.keys.left = false;
-			this.keys.right = false;
-			this.keys.up = false;
-			this.keys.down = false;
-			this.keys.jump = false;
-			this.keys.attack = false;
-
-			// Determine movement direction
-			if (Math.abs(deltaX) > threshold) {
-				if (deltaX > 0) {
-					this.keys.right = true;
-				} else {
-					this.keys.left = true;
-				}
-			}
-
-			if (Math.abs(deltaY) > threshold) {
-				if (deltaY > 0) {
-					this.keys.down = true;
-				} else {
-					this.keys.up = true;
-					this.keys.jump = true;
-				}
-			}
-
-			// Tap to attack
+			
 			if (Math.abs(deltaX) < threshold && Math.abs(deltaY) < threshold) {
 				this.keys.attack = true;
 				setTimeout(() => this.keys.attack = false, 100);
@@ -1028,10 +1064,28 @@ export class GameEngine {
 	}
 
 	private updatePlayerPhysics(delta: number): void {
-		const moveSpeed = 6; // Slightly faster movement
-		const airMoveSpeed = 4; // Reduced speed in air for better control
-		const jumpForce = 18; // Higher jumps for better building access
-		const gravity = 30; // Slightly stronger gravity for better control
+		// Safety check - ensure player exists before updating physics
+		if (!this.playerGroup) {
+			return;
+		}
+		
+		// If climbing, skip all physics updates
+		if (this.isClimbingLadder) {
+			return;
+		}
+		
+		// Store previous position for interpolation
+		this.lastPosition.copy(this.playerGroup.position);
+		this.lastVelocity.copy(this.playerVelocity);
+
+		// Handle input-based movement
+		const moveX = (this.keys.right ? 1 : 0) - (this.keys.left ? 1 : 0);
+		const moveZ = (this.keys.up ? 1 : 0) - (this.keys.down ? 1 : 0);
+		
+		// Normalize diagonal movement
+		const moveMagnitude = Math.sqrt(moveX * moveX + moveZ * moveZ);
+		const normalizedMoveX = moveMagnitude > 0 ? moveX / moveMagnitude : 0;
+		const normalizedMoveZ = moveMagnitude > 0 ? moveZ / moveMagnitude : 0;
 
 		// Get camera direction for movement relative to camera
 		const cameraDirection = new THREE.Vector3(0, 0, -1);
@@ -1040,61 +1094,75 @@ export class GameEngine {
 		const cameraRight = new THREE.Vector3(1, 0, 0);
 		cameraRight.applyAxisAngle(new THREE.Vector3(0, 1, 0), this.cameraRotationY);
 
-		// Handle movement relative to camera direction
-		let moveX = 0;
-		let moveZ = 0;
+		// Calculate movement speed
+		const baseSpeed = this.playerOnGround ? 8 : 4; // Reduced air control
+		const currentSpeed = baseSpeed * (this.isMoving ? 1.5 : 1); // Running speed
 
-		if (this.keys.left) moveX -= 1;
-		if (this.keys.right) moveX += 1;
-		if (this.keys.up) moveZ += 1; // Fixed: W should move forward (positive Z)
-		if (this.keys.down) moveZ -= 1; // Fixed: S should move backward (negative Z)
+		// Calculate target velocity in camera-relative space
+		const targetVelocityX = (cameraRight.x * normalizedMoveX + cameraDirection.x * normalizedMoveZ) * currentSpeed;
+		const targetVelocityZ = (cameraRight.z * normalizedMoveX + cameraDirection.z * normalizedMoveZ) * currentSpeed;
 
-		// Normalize diagonal movement
-		if (moveX !== 0 && moveZ !== 0) {
-			moveX *= 0.707;
-			moveZ *= 0.707;
+		// Apply movement forces
+		if (this.playerOnGround) {
+			// Ground movement with friction
+			// Smooth velocity interpolation
+			this.playerVelocity.x += (targetVelocityX - this.playerVelocity.x) * 8 * delta;
+			this.playerVelocity.z += (targetVelocityZ - this.playerVelocity.z) * 8 * delta;
+			
+			// Apply friction when not moving
+			if (moveMagnitude === 0) {
+				this.playerVelocity.x *= 0.85;
+				this.playerVelocity.z *= 0.85;
+			}
+		} else {
+			// Air movement with reduced control
+			const airControl = 0.3;
+			this.playerVelocity.x += targetVelocityX * airControl * delta;
+			this.playerVelocity.z += targetVelocityZ * airControl * delta;
 		}
-
-		// Apply movement relative to camera - different speeds for ground vs air
-		const currentMoveSpeed = this.playerOnGround ? moveSpeed : airMoveSpeed;
-		this.playerVelocity.x = (cameraRight.x * moveX + cameraDirection.x * moveZ) * currentMoveSpeed;
-		this.playerVelocity.z = (cameraRight.z * moveX + cameraDirection.z * moveZ) * currentMoveSpeed;
 
 		// Update movement state for animation
-		this.isMoving = moveX !== 0 || moveZ !== 0;
+		this.isMoving = moveMagnitude > 0;
 
-		// Apply friction when not moving (less friction in air)
-		if (moveX === 0 && moveZ === 0) {
-			const friction = this.playerOnGround ? 0.8 : 0.95; // Less friction in air
-			this.playerVelocity.x *= friction;
-			this.playerVelocity.z *= friction;
+		// Handle jumping with improved physics
+		if (this.keys.jump) {
+			this.jumpBufferCounter = this.jumpBufferTime;
 		}
 
-		// Handle jumping - allow jumping while moving
-		if (this.keys.jump && this.playerOnGround) {
-			this.playerVelocity.y = jumpForce;
+		// Apply jump if conditions are met
+		if (this.jumpBufferCounter > 0 && (this.playerOnGround || this.coyoteTimeCounter > 0)) {
+			this.playerVelocity.y = 12; // Increased jump force
 			this.playerOnGround = false;
+			this.jumpBufferCounter = 0;
+			this.coyoteTimeCounter = 0;
+			
+			// If jumping from a building, clear building state to prevent collision loops
+			if (this.isOnBuilding) {
+				this.isOnBuilding = false;
+				this.currentBuildingHeight = 0;
+			}
 		}
 
-		// Apply gravity
-		if (!this.playerOnGround) {
-			this.playerVelocity.y -= gravity * delta;
+		// Apply gravity with terminal velocity
+		const gravity = 25; // Increased gravity
+		const terminalVelocity = 20;
+		this.playerVelocity.y -= gravity * delta;
+		this.playerVelocity.y = Math.max(this.playerVelocity.y, -terminalVelocity);
+
+		// Update coyote time
+		if (this.playerOnGround) {
+			this.coyoteTimeCounter = this.coyoteTime;
+		} else {
+			this.coyoteTimeCounter -= delta;
 		}
 
-		// Update position
+		// Update jump buffer
+		this.jumpBufferCounter -= delta;
+
+		// Apply velocity to position
 		this.playerGroup.position.add(this.playerVelocity.clone().multiplyScalar(delta));
 
-		// Check for ground collision and building surfaces
-		this.checkGroundCollision();
-
-		// Boundary collision - updated for larger map
-		this.playerGroup.position.x = Math.max(-this.mapBounds, Math.min(this.mapBounds, this.playerGroup.position.x));
-		this.playerGroup.position.z = Math.max(-this.mapBounds, Math.min(this.mapBounds, this.playerGroup.position.z));
-
-		// Building collision and climbing with improved building-to-building jumping
-		this.checkBuildingCollisions();
-
-		// Update character rotation to face camera direction (even in air)
+		// Update character rotation based on movement
 		this.updateCharacterRotation(moveX, moveZ);
 
 		// Update running animation
@@ -1103,74 +1171,259 @@ export class GameEngine {
 		// Update weapon animation
 		this.updateWeaponAnimation(delta);
 
-		// Update camera position based on mouse rotation
+		// Update camera
 		this.updateCamera();
+
+		// Handle collisions with delta parameter
+		this.handleCollisions(delta);
+
+		// Prevent getting stuck
+		this.preventStuckPosition();
 	}
 
-	private checkGroundCollision(): void {
-		// Check if player is on ground level
-		if (this.playerGroup.position.y <= 1) {
+	private preventStuckPosition(): void {
+		// If player is in an invalid position, reset to a safe position
+		if (this.playerGroup.position.y < 0) {
 			this.playerGroup.position.y = 1;
 			this.playerVelocity.y = 0;
 			this.playerOnGround = true;
+			this.isOnBuilding = false;
+			this.currentBuildingHeight = 0;
 		}
 		
-		// Check if player is falling and should be on ground
-		if (this.playerVelocity.y < 0 && this.playerGroup.position.y <= 1.1) {
-			this.playerGroup.position.y = 1;
+		// If player is stuck in a building, push them out
+		if (this.isOnBuilding && this.playerGroup.position.y < this.currentBuildingHeight) {
+			this.playerGroup.position.y = this.currentBuildingHeight + 1;
 			this.playerVelocity.y = 0;
-			this.playerOnGround = true;
 		}
+	}
+
+	private handleCollisions(delta: number): void {
+		// Skip collisions during climbing
+		if (this.isClimbingLadder) {
+			return;
+		}
+		
+		// 1. Building collisions (highest priority - check for landings first)
+		this.checkBuildingCollisions(delta);
+		
+		// 2. Ground collision (only if not on a building and not climbing)
+		if (!this.isOnBuilding && this.playerGroup.position.y <= 1.5) {
+			this.checkGroundCollision(delta);
+		}
+		
+		// 3. Boundary collision
+		this.playerGroup.position.x = Math.max(-this.mapBounds, Math.min(this.mapBounds, this.playerGroup.position.x));
+		this.playerGroup.position.z = Math.max(-this.mapBounds, Math.min(this.mapBounds, this.playerGroup.position.z));
+	}
+
+	private checkGroundCollision(delta: number): void {
+		const groundLevel = 1;
+		
+		// Check if player is below ground level and falling
+		if (this.playerGroup.position.y <= groundLevel && this.playerVelocity.y <= 0) {
+			// Only set as on ground if not on a building and not climbing
+			if (!this.isOnBuilding && !this.isClimbingLadder) {
+				this.playerGroup.position.y = groundLevel;
+				this.playerVelocity.y = 0;
+				this.playerOnGround = true;
+				this.isOnBuilding = false;
+				this.currentBuildingHeight = 0;
+			}
+		}
+	}
+
+	private checkBuildingCollisions(delta: number): void {
+		// Update building exit timer
+		if (this.buildingExitTimer > 0) {
+			this.buildingExitTimer -= delta;
+		}
+		
+		let landedOnBuilding = false;
+		
+		this.buildings.forEach(building => {
+			const buildingPos = building.mesh.position;
+			const distance = this.playerGroup.position.distanceTo(buildingPos);
+			const playerHeight = this.playerGroup.position.y;
+			const buildingTop = building.height;
+			
+			// Check if player is on top of building - more stable detection with buffer
+			const isOnBuilding = playerHeight > buildingTop - 0.5 && playerHeight < buildingTop + 2.5;
+			const isNearBuilding = distance < 3.0;
+			
+			// If already on this building, maintain position with buffer
+			if (this.isOnBuilding && this.currentBuildingHeight === buildingTop && distance < 4.0) {
+				// Only maintain position if player is not actively jumping off
+				if (this.playerVelocity.y <= 0) {
+					// Keep player on this building with a small buffer to prevent edge glitching
+					this.playerGroup.position.y = buildingTop + 1;
+					this.playerVelocity.y = 0;
+					this.playerOnGround = true;
+					landedOnBuilding = true;
+				} else {
+					// Player is jumping off - allow them to leave the building
+					this.isOnBuilding = false;
+					this.currentBuildingHeight = 0;
+					this.buildingExitTimer = 0.5; // Set timer to prevent immediate re-detection
+				}
+				return; // Skip other collision checks for this building
+			}
+			
+			// ALWAYS check for building collision regardless of player state
+			if (isNearBuilding && this.buildingExitTimer <= 0) {
+				if (isOnBuilding && distance < 3.5 && this.playerVelocity.y <= 0) {
+					// Player is on top of building - ensure they stay on top (only if not jumping)
+					this.playerGroup.position.y = buildingTop + 1;
+					this.playerVelocity.y = 0;
+					this.playerOnGround = true;
+					this.isOnBuilding = true;
+					this.currentBuildingHeight = buildingTop;
+					landedOnBuilding = true;
+					
+					// Debug: Log successful building landing
+					if (Math.random() < 0.005) { // Only log occasionally
+						console.log(`Landed on building at height ${buildingTop}, player height: ${playerHeight.toFixed(2)}`);
+					}
+				} else if (distance < 2.5) {
+					// Player is colliding with building side - ALWAYS push away
+					const direction = this.playerGroup.position.clone().sub(buildingPos).normalize();
+					this.playerGroup.position.copy(buildingPos.clone().add(direction.multiplyScalar(3)));
+					
+					// Stop player velocity in collision direction
+					const velocity2D = new THREE.Vector3(this.playerVelocity.x, 0, this.playerVelocity.z);
+					const velocityDot = velocity2D.dot(direction);
+					if (velocityDot < 0) {
+						// Only stop velocity if moving toward building
+						this.playerVelocity.x -= direction.x * velocityDot;
+						this.playerVelocity.z -= direction.z * velocityDot;
+					}
+				}
+			}
+			
+			// Check climbing only if not already on a building
+			if (!landedOnBuilding && !this.isOnBuilding) {
+				this.checkClimbing(building, buildingPos, buildingTop, delta);
+			}
+		});
+
+		// Check for building-to-building jumping only if not on a building
+		if (!landedOnBuilding && !this.isOnBuilding) {
+			this.checkBuildingToBuildingJumping();
+		}
+		
+		// Reset building state if not on any building and falling (with buffer)
+		if (!landedOnBuilding && this.playerGroup.position.y < 0.5) {
+			this.isOnBuilding = false;
+			this.currentBuildingHeight = 0;
+		}
+	}
+
+	private checkClimbing(building: Building, buildingPos: THREE.Vector3, buildingTop: number, delta: number): void {
+		if (!building.climbable || !building.ladder) return;
+		
+		const ladderPos = building.ladder.position;
+		const distanceToLadder = this.playerGroup.position.distanceTo(ladderPos);
+		const playerHeight = this.playerGroup.position.y;
+		
+		// Check if player is near the ladder (increased range for better usability)
+		const ladderDetectionRange = 8.0; // Increased range for better accessibility
+		const nearLadder = distanceToLadder < ladderDetectionRange;
+		
+		// Update ladder interaction state
+		if (nearLadder && !this.nearLadder) {
+			this.nearLadder = true;
+			this.currentLadder = building.ladder;
+			this.showLadderIndicator(ladderPos);
+		} else if (!nearLadder && this.nearLadder && this.currentLadder === building.ladder) {
+			this.nearLadder = false;
+			this.currentLadder = null;
+			this.hideLadderIndicator();
+			
+			// Stop climbing if player moves away from ladder
+			if (this.isClimbingLadder) {
+				this.stopClimbing();
+			}
+		}
+		
+		// Handle ladder climbing with Space key
+		if (this.nearLadder && this.currentLadder === building.ladder) {
+			// Start climbing when Space is pressed and player is near ladder
+			if (this.keys.jump && !this.isClimbingLadder) {
+				this.startClimbing(buildingTop, ladderPos);
+			}
+			
+			// Continue climbing while Space is held
+			if (this.isClimbingLadder && this.keys.jump) {
+				this.continueClimbing(delta, ladderPos);
+			}
+			
+			// Stop climbing when Space is released
+			if (this.isClimbingLadder && !this.keys.jump) {
+				this.stopClimbing();
+			}
+		}
+	}
+
+	private checkBuildingToBuildingJumping(): void {
+		// Only check when player is in air and moving
+		if (this.playerOnGround || (this.playerVelocity.x === 0 && this.playerVelocity.z === 0)) return;
+		
+		this.buildings.forEach(building => {
+			const buildingPos = building.mesh.position;
+			const distance = this.playerGroup.position.distanceTo(buildingPos);
+			const playerHeight = this.playerGroup.position.y;
+			const buildingTop = building.height;
+			
+			// Check if player is jumping toward a building - more generous detection
+			if (distance < 6 && playerHeight > buildingTop - 2 && playerHeight < buildingTop + 4) {
+				const playerToBuilding = buildingPos.clone().sub(this.playerGroup.position).normalize();
+				const jumpDirection = new THREE.Vector3(this.playerVelocity.x, 0, this.playerVelocity.z).normalize();
+				
+				// Only check if player has significant horizontal velocity
+				if (jumpDirection.length() > 0.1) {
+					const dotProduct = jumpDirection.dot(playerToBuilding);
+					
+					// Land on building if jumping toward it - more generous angle
+					if (dotProduct > 0.2) {
+						this.playerGroup.position.y = buildingTop + 1;
+						this.playerVelocity.y = 0;
+						this.playerOnGround = true;
+						this.isOnBuilding = true;
+						this.currentBuildingHeight = buildingTop;
+						
+						// Add landing effect
+						this.addLandingEffect(this.playerGroup.position.clone());
+						
+						// Debug: Log successful building-to-building jump
+						console.log(`Building-to-building jump successful! Landed on building at height ${buildingTop}`);
+					}
+				}
+			}
+		});
 	}
 
 	private updateRunningAnimation(delta: number): void {
-		if (!this.isMoving) {
-			// Reset to idle position
-			if (this.leftArmGroup) {
-				this.leftArmGroup.rotation.z = 0;
-			}
-			if (this.rightArmGroup) {
-				this.rightArmGroup.rotation.z = 0;
-			}
-			if (this.leftLegGroup) {
-				this.leftLegGroup.rotation.z = 0;
-			}
-			if (this.rightLegGroup) {
-				this.rightLegGroup.rotation.z = 0;
-			}
-			return;
-		}
-
-		// Update animation time
-		this.animationTime += delta * 8; // Faster animation
-
-		// Arm swinging animation
-		if (this.leftArmGroup && this.rightArmGroup) {
-			// Left arm swings forward when right leg steps forward
-			this.leftArmGroup.rotation.z = Math.sin(this.animationTime) * 0.8;
-			// Right arm swings backward when left leg steps forward
-			this.rightArmGroup.rotation.z = -Math.sin(this.animationTime) * 0.8;
-		}
-
-		// Leg stepping animation
-		if (this.leftLegGroup && this.rightLegGroup) {
-			// Left leg steps forward
-			this.leftLegGroup.rotation.z = Math.sin(this.animationTime) * 0.4;
-			// Right leg steps backward
-			this.rightLegGroup.rotation.z = -Math.sin(this.animationTime) * 0.4;
-		}
-
-		// Body bobbing effect
-		if (this.playerGroup) {
-			this.playerGroup.position.y = 1 + Math.sin(this.animationTime * 2) * 0.05;
-		}
+		// Running animation removed - placeholder player doesn't need complex animations
 	}
 
 	private updateCharacterRotation(moveX: number, moveZ: number): void {
 		if (moveX === 0 && moveZ === 0) return;
 
-		// Calculate target rotation based on movement direction
-		const targetRotation = Math.atan2(moveX, moveZ);
+		// Calculate movement direction in camera-relative space
+		const cameraDirection = new THREE.Vector3(0, 0, -1);
+		cameraDirection.applyAxisAngle(new THREE.Vector3(0, 1, 0), this.cameraRotationY);
+		
+		const cameraRight = new THREE.Vector3(1, 0, 0);
+		cameraRight.applyAxisAngle(new THREE.Vector3(0, 1, 0), this.cameraRotationY);
+
+		// Calculate actual movement direction in world space
+		const moveDirection = new THREE.Vector3();
+		moveDirection.add(cameraRight.clone().multiplyScalar(moveX));
+		moveDirection.add(cameraDirection.clone().multiplyScalar(moveZ));
+		moveDirection.normalize();
+
+		// Calculate target rotation based on actual movement direction
+		const targetRotation = Math.atan2(moveDirection.x, moveDirection.z);
 		
 		// Get current rotation
 		const currentRotation = this.playerGroup.rotation.y;
@@ -1203,172 +1456,7 @@ export class GameEngine {
 	}
 
 	private updateWeaponAnimation(delta: number): void {
-		if (!this.weaponMesh) return;
-
-		// Weapon follows player movement with natural positioning
-		this.weaponMesh.position.copy(this.playerGroup.position);
-		this.weaponMesh.position.x += 0.5; // Slightly to the right
-		this.weaponMesh.position.y += 0.2; // At hand level
-		this.weaponMesh.position.z += 0.2; // Slightly forward
-
-		// Apply character rotation to weapon
-		this.weaponMesh.rotation.y = this.playerGroup.rotation.y;
-
-		// Weapon sways with movement
-		if (this.isMoving) {
-			// Natural swaying motion
-			this.weaponMesh.rotation.z = -Math.PI / 6 + Math.sin(this.animationTime * 4) * 0.1;
-			this.weaponMesh.rotation.x = Math.PI / 12 + Math.sin(this.animationTime * 2) * 0.05;
-		} else {
-			// Idle position
-			this.weaponMesh.rotation.z = -Math.PI / 6;
-			this.weaponMesh.rotation.x = Math.PI / 12;
-		}
-
-		// Attack animation
-		if (this.isAttacking) {
-			// Weapon swings during attack
-			this.weaponMesh.rotation.z = -Math.PI / 6 + Math.sin(Date.now() * 0.02) * 0.5;
-			this.weaponMesh.rotation.y += Math.sin(Date.now() * 0.03) * 0.3;
-		}
-	}
-
-	private checkBuildingCollisions(): void {
-		this.buildings.forEach(building => {
-			const buildingPos = building.mesh.position;
-			const distance = this.playerGroup.position.distanceTo(buildingPos);
-			
-			// Check if player is on top of building
-			const playerHeight = this.playerGroup.position.y;
-			const buildingTop = building.height;
-			const isOnBuilding = playerHeight > buildingTop - 0.5 && playerHeight < buildingTop + 2;
-			
-			if (isOnBuilding && distance < 3) {
-				// Player is on top of building - snap to building surface
-				this.playerGroup.position.y = buildingTop + 1;
-				this.playerOnGround = true;
-				this.playerVelocity.y = 0;
-			} else if (distance < 2.5 && !isOnBuilding) {
-				// Collision detected - push player away
-				const direction = this.playerGroup.position.clone().sub(buildingPos).normalize();
-				this.playerGroup.position.copy(buildingPos.clone().add(direction.multiplyScalar(3)));
-			}
-			
-			// Check for climbing opportunity (even during jumps)
-			if (building.climbable && this.keys.jump) {
-				// More forgiving climbing detection
-				const playerToBuilding = this.playerGroup.position.clone().sub(buildingPos);
-				const buildingRadius = 4; // Increased radius for easier climbing
-				
-				if (playerToBuilding.length() < buildingRadius) {
-					// Check if player is at the right height to climb
-					const playerHeight = this.playerGroup.position.y;
-					const buildingTop = building.height;
-					
-					// Allow climbing if player is near the building and jumping
-					if (playerHeight < buildingTop + 4) {
-						// Climb to building top
-						this.playerGroup.position.y = buildingTop + 1;
-						this.playerVelocity.y = 0;
-						this.playerOnGround = true;
-						
-						// Add a small forward push to get on top
-						const climbDirection = playerToBuilding.normalize();
-						this.playerGroup.position.add(climbDirection.multiplyScalar(1));
-						
-						// Add climbing effect
-						this.addClimbingEffect(this.playerGroup.position.clone());
-					}
-				}
-			}
-		});
-
-		// Check for climbing on street lights and other structures
-		this.checkClimbableStructures();
-		
-		// Check for building-to-building jumping with improved mid-air control
-		this.checkBuildingToBuildingJumping();
-	}
-
-	private checkBuildingToBuildingJumping(): void {
-		// Check if player is jumping from one building to another
-		if (this.playerVelocity.y > 0 || !this.playerOnGround) {
-			let closestBuilding = null;
-			let closestDistance = Infinity;
-			
-			this.buildings.forEach(building => {
-				const buildingPos = building.mesh.position;
-				const distance = this.playerGroup.position.distanceTo(buildingPos);
-				const playerHeight = this.playerGroup.position.y;
-				const buildingTop = building.height;
-				
-				// Check if player is jumping toward a building
-				if (distance < 6 && playerHeight > buildingTop - 1 && playerHeight < buildingTop + 3) {
-					// Player is jumping toward this building
-					const playerToBuilding = buildingPos.clone().sub(this.playerGroup.position).normalize();
-					const jumpDirection = new THREE.Vector3(this.playerVelocity.x, 0, this.playerVelocity.z).normalize();
-					
-					// Check if player is jumping in the direction of the building
-					const dotProduct = jumpDirection.dot(playerToBuilding);
-					
-					// Track closest building for visual feedback
-					if (distance < closestDistance && dotProduct > 0.1) {
-						closestDistance = distance;
-						closestBuilding = building;
-					}
-					
-					if (dotProduct > 0.2) { // More forgiving angle for landing
-						// Land on the building
-						this.playerGroup.position.y = buildingTop + 1;
-						this.playerVelocity.y = 0;
-						this.playerOnGround = true;
-						
-						// Add landing effect
-						this.addLandingEffect(this.playerGroup.position.clone());
-					}
-				}
-			});
-			
-			// Add visual feedback for closest building
-			if (closestBuilding && !this.playerOnGround) {
-				this.addBuildingTargetIndicator(closestBuilding);
-			}
-		}
-	}
-
-	private addBuildingTargetIndicator(building: Building): void {
-		// Create a temporary visual indicator on the building
-		const indicatorGeometry = new THREE.RingGeometry(2.2, 2.5, 8);
-		const indicatorMaterial = new THREE.MeshBasicMaterial({ 
-			color: 0x00ff00,
-			transparent: true,
-			opacity: 0.6,
-			side: THREE.DoubleSide
-		});
-		const indicator = new THREE.Mesh(indicatorGeometry, indicatorMaterial);
-		
-		indicator.position.copy(building.mesh.position);
-		indicator.position.y = building.height + 0.1;
-		indicator.rotation.x = -Math.PI / 2;
-		
-		this.scene.add(indicator);
-		
-		// Animate the indicator
-		const startTime = Date.now();
-		const animateIndicator = () => {
-			const elapsed = (Date.now() - startTime) / 1000;
-			const pulse = Math.sin(elapsed * 4) * 0.3 + 0.7;
-			
-			indicator.material.opacity = 0.6 * pulse;
-			indicator.scale.setScalar(1 + Math.sin(elapsed * 2) * 0.1);
-			
-			if (this.playerOnGround || elapsed > 2) {
-				this.scene.remove(indicator);
-			} else {
-				requestAnimationFrame(animateIndicator);
-			}
-		};
-		animateIndicator();
+		// Weapon animation removed - placeholder player doesn't have weapons
 	}
 
 	private addLandingEffect(position: THREE.Vector3): void {
@@ -1450,21 +1538,6 @@ export class GameEngine {
 			};
 			animateParticle();
 		}
-		
-		// Add weapon swing animation
-		if (this.weaponMesh) {
-			const startRotation = this.weaponMesh.rotation.z;
-			const swingAnimation = () => {
-				const progress = (0.3 - this.attackCooldown) / 0.3;
-				if (progress < 1) {
-					// Full 360-degree swing
-					this.weaponMesh!.rotation.z = startRotation + progress * Math.PI * 2;
-					this.weaponMesh!.rotation.y = Math.sin(progress * Math.PI * 4) * 0.3;
-					requestAnimationFrame(swingAnimation);
-				}
-			};
-			swingAnimation();
-		}
 	}
 
 	private playAttackSound(): void {
@@ -1529,8 +1602,8 @@ export class GameEngine {
 			// Move towards player
 			const distance = zombie.mesh.position.distanceTo(this.playerGroup.position);
 			if (distance > 0.5) {
-				const toZombie = zombie.mesh.position.clone().sub(this.playerGroup.position).normalize();
-				zombie.mesh.position.sub(toZombie.multiplyScalar(zombie.speed * delta));
+				const toPlayer = this.playerGroup.position.clone().sub(zombie.mesh.position).normalize();
+				zombie.mesh.position.add(toPlayer.multiplyScalar(zombie.speed * delta));
 			}
 			
 			// Check building collisions for zombies
@@ -1550,6 +1623,298 @@ export class GameEngine {
 				this.zombies.splice(index, 1);
 			}
 		});
+	}
+
+	private updateItems(delta: number): void {
+		this.items.forEach((item, index) => {
+			// Rotate items
+			item.mesh.rotation.y += delta * 2;
+			
+			// Check for collection
+			if (item.mesh.position.distanceTo(this.playerGroup.position) < 1.5) {
+				// Collect item
+				this.scene.remove(item.mesh);
+				this.items.splice(index, 1);
+				this.gameState.itemsCollected++;
+				
+				// Apply item effect
+				if (item.type === 'health') {
+					this.playerHealth = Math.min(100, this.playerHealth + 30);
+				} else if (item.type === 'weapon') {
+					// Give health boost instead of weapon upgrade for now
+					this.playerHealth = Math.min(100, this.playerHealth + 50);
+				}
+			}
+		});
+	}
+
+	private staggerZombie(zombie: Zombie): void {
+		// Push zombie away from player
+		const staggerDirection = zombie.mesh.position.clone().sub(this.playerGroup.position).normalize();
+		zombie.mesh.position.add(staggerDirection.multiplyScalar(2));
+		
+		// Temporarily reduce speed
+		zombie.speed *= 0.5;
+		setTimeout(() => {
+			zombie.speed *= 2;
+		}, 1000);
+	}
+
+	private attack(): void {
+		if (this.isAttacking || this.attackCooldown > 0) return;
+		
+		this.isAttacking = true;
+		this.attackCooldown = 0.5;
+		
+		// Create 360-degree attack effect
+		this.create360AttackEffect();
+		
+		// Play attack sound
+		this.playAttackSound();
+		
+		// Check for zombie hits in a circle around player
+		const attackRadius = 3;
+		this.zombies.forEach((zombie, index) => {
+			const distance = zombie.mesh.position.distanceTo(this.playerGroup.position);
+			if (distance < attackRadius) {
+				zombie.health--;
+				if (zombie.health <= 0) {
+					this.killZombie(zombie, index);
+				} else {
+					this.staggerZombie(zombie);
+				}
+			}
+		});
+		
+		// Reset attack state
+		setTimeout(() => {
+			this.isAttacking = false;
+		}, 300);
+	}
+
+	private create360AttackEffect(): void {
+		// Create a circular attack effect around the player
+		const segments = 16;
+		const radius = 3;
+		
+		for (let i = 0; i < segments; i++) {
+			const angle = (i / segments) * Math.PI * 2;
+			const x = Math.cos(angle) * radius;
+			const z = Math.sin(angle) * radius;
+			
+			// Create attack particle
+			const particleGeometry = new THREE.SphereGeometry(0.1, 4, 4);
+			const particleMaterial = new THREE.MeshLambertMaterial({ 
+				color: 0xffaa00,
+				emissive: 0x442200,
+				transparent: true,
+				opacity: 0.8
+			});
+			const particle = new THREE.Mesh(particleGeometry, particleMaterial);
+			
+			particle.position.copy(this.playerGroup.position);
+			particle.position.x += x;
+			particle.position.z += z;
+			particle.position.y = 1;
+			
+			this.scene.add(particle);
+			
+			// Animate particle
+			const startTime = Date.now();
+			const animateParticle = () => {
+				const elapsed = (Date.now() - startTime) / 1000;
+				const progress = elapsed / 0.3; // 0.3 second animation
+				
+				if (progress < 1) {
+					// Expand outward
+					const currentRadius = radius * (1 + progress * 0.5);
+					particle.position.x = this.playerGroup.position.x + Math.cos(angle) * currentRadius;
+					particle.position.z = this.playerGroup.position.z + Math.sin(angle) * currentRadius;
+					particle.position.y = 1 + Math.sin(progress * Math.PI) * 0.5;
+					
+					// Fade out
+					particle.material.opacity = 0.8 * (1 - progress);
+					particle.scale.setScalar(1 + progress * 0.5);
+					
+					requestAnimationFrame(animateParticle);
+				} else {
+					this.scene.remove(particle);
+				}
+			};
+			animateParticle();
+		}
+	}
+
+	private showLadderIndicator(ladderPos: THREE.Vector3): void {
+		// Remove existing indicator if any
+		this.hideLadderIndicator();
+		
+		// Create a bright, pulsing ring indicator - larger for bigger ladders
+		const ringGeometry = new THREE.RingGeometry(2.5, 3.5, 16); // Larger ring for bigger ladders
+		const ringMaterial = new THREE.MeshBasicMaterial({ 
+			color: 0x00ff00,
+			transparent: true,
+			opacity: 0.9, // More visible
+			side: THREE.DoubleSide
+		});
+		
+		this.ladderIndicator = new THREE.Mesh(ringGeometry, ringMaterial);
+		this.ladderIndicator.position.copy(ladderPos);
+		this.ladderIndicator.position.y = 0.1; // Slightly above ground
+		this.ladderIndicator.rotation.x = -Math.PI / 2; // Lay flat on ground
+		
+		// Add to scene
+		this.scene.add(this.ladderIndicator);
+		
+		// Start pulsing animation
+		this.animateLadderIndicator();
+		
+		console.log('Ladder indicator shown - press SPACE to climb!');
+	}
+
+	private hideLadderIndicator(): void {
+		if (this.ladderIndicator) {
+			this.scene.remove(this.ladderIndicator);
+			this.ladderIndicator = null;
+		}
+	}
+
+	private animateLadderIndicator(): void {
+		if (!this.ladderIndicator) return;
+		
+		const animate = () => {
+			if (!this.ladderIndicator || !this.nearLadder) return;
+			
+			// Pulsing scale effect
+			const time = Date.now() * 0.003;
+			const scale = 1 + Math.sin(time) * 0.2;
+			this.ladderIndicator.scale.setScalar(scale);
+			
+			// Color pulsing effect
+			const material = this.ladderIndicator.material as THREE.MeshBasicMaterial;
+			const intensity = 0.5 + Math.sin(time * 2) * 0.3;
+			material.color.setHex(0x00ff00);
+			material.opacity = 0.6 + intensity * 0.4;
+			
+			// Continue animation
+			requestAnimationFrame(animate);
+		};
+		
+		animate();
+	}
+
+	private handleLadderClimbing(buildingTop: number, delta: number, ladderPos: THREE.Vector3): void {
+		// Gradually climb up the ladder
+		this.ladderClimbProgress += this.ladderClimbSpeed * delta;
+		
+		// Update player position during climbing
+		const climbHeight = Math.min(this.ladderClimbProgress, buildingTop - 1);
+		this.playerGroup.position.y = climbHeight;
+		
+		// Keep player aligned with ladder
+		this.playerGroup.position.x = ladderPos.x;
+		this.playerGroup.position.z = ladderPos.z;
+		
+		// Check if climbing is complete
+		if (this.ladderClimbProgress >= buildingTop - 1) {
+			// Finish climbing
+			this.isClimbingLadder = false;
+			this.playerOnGround = true;
+			this.playerVelocity.y = 0;
+			this.ladderClimbProgress = 0;
+			
+			// Position player on top of building
+			this.playerGroup.position.y = buildingTop + 1;
+			
+			// Add climbing completion effect
+			this.addClimbingEffect(this.playerGroup.position.clone());
+			
+			// Hide ladder indicator after climbing
+			this.hideLadderIndicator();
+			this.nearLadder = false;
+			this.currentLadder = null;
+		}
+	}
+
+	private startClimbing(buildingTop: number, ladderPos: THREE.Vector3): void {
+		this.isClimbingLadder = true;
+		this.ladderClimbProgress = 0;
+		this.ladderStartHeight = this.playerGroup.position.y;
+		this.ladderClimbTarget = buildingTop + 2; // Climb higher above the roof
+		
+		// Disable physics during climbing
+		this.playerOnGround = false;
+		this.playerVelocity.set(0, 0, 0); // Stop all movement
+		this.isOnBuilding = false; // Clear building state
+		this.currentBuildingHeight = 0;
+		
+		// Position player at the ladder (outside the building)
+		this.playerGroup.position.x = ladderPos.x;
+		this.playerGroup.position.z = ladderPos.z;
+		
+		// Add climbing start effect
+		this.addClimbingEffect(this.playerGroup.position.clone());
+	}
+
+	private continueClimbing(delta: number, ladderPos: THREE.Vector3): void {
+		// Calculate how much to climb this frame
+		const climbAmount = this.ladderClimbSpeed * delta;
+		
+		// Simply add to current height - no complex progress calculations
+		const newHeight = this.playerGroup.position.y + climbAmount;
+		
+		// Update player position - keep them at the ladder position (outside the building)
+		this.playerGroup.position.y = newHeight;
+		this.playerGroup.position.x = ladderPos.x; // This should be the ladder's x position (x + 3.5)
+		this.playerGroup.position.z = ladderPos.z;
+		
+		// Keep velocity at zero during climbing to prevent physics interference
+		this.playerVelocity.set(0, 0, 0);
+		
+		// Check if climbing is complete - climb well above the building
+		if (newHeight >= this.ladderClimbTarget) {
+			this.finishClimbing();
+		}
+	}
+
+	private stopClimbing(): void {
+		if (!this.isClimbingLadder) return;
+		
+		this.isClimbingLadder = false;
+		this.ladderClimbProgress = 0;
+		
+		// Re-enable physics but keep player at current height
+		this.playerOnGround = false;
+		this.playerVelocity.set(0, 0, 0);
+		
+		// The physics system will handle falling if they're not on ground
+	}
+
+	private finishClimbing(): void {
+		this.isClimbingLadder = false;
+		this.ladderClimbProgress = 0;
+		
+		// Ensure player is at the target height (above the roof)
+		this.playerGroup.position.y = this.ladderClimbTarget;
+		
+		// Move player slightly away from ladder to avoid getting stuck
+		// Since ladder is at x + 3.5, move player further away from building
+		const ladderDirection = new THREE.Vector3(1, 0, 0); // Away from building
+		this.playerGroup.position.add(ladderDirection.multiplyScalar(2.0)); // Move further away
+		
+		// Re-enable physics
+		this.playerOnGround = true;
+		this.playerVelocity.set(0, 0, 0);
+		this.isOnBuilding = true;
+		this.currentBuildingHeight = this.ladderClimbTarget - 2; // Set building height
+		
+		// Add climbing completion effect
+		this.addClimbingEffect(this.playerGroup.position.clone());
+		
+		// Hide ladder indicator after climbing
+		this.hideLadderIndicator();
+		this.nearLadder = false;
+		this.currentLadder = null;
 	}
 
 	private animate(): void {
@@ -1575,6 +1940,12 @@ export class GameEngine {
 
 		// Update player physics and animation
 		this.updatePlayerPhysics(delta);
+		
+		// Update player animations
+		this.updatePlayerAnimation(delta);
+
+		// Update character animations
+		this.updateCharacterAnimations(delta);
 
 		// Update zombies
 		this.updateZombies(delta);
@@ -1632,7 +2003,6 @@ export class GameEngine {
 		this.playerVelocity.set(0, 0, 0);
 		this.playerOnGround = true;
 		this.playerHealth = 100;
-		this.currentWeapon = 'bat';
 		this.isAttacking = false;
 		this.attackCooldown = 0;
 
@@ -1662,8 +2032,23 @@ export class GameEngine {
 		this.animationTime = 0;
 		this.isMoving = false;
 
-		// Add starting weapon
-		this.addWeapon('bat');
+		// Reset ladder states
+		this.nearLadder = false;
+		this.currentLadder = null;
+		this.isClimbingLadder = false;
+		this.ladderClimbProgress = 0;
+		this.ladderClimbTarget = 0;
+		this.ladderStartHeight = 0;
+		this.hideLadderIndicator();
+
+		// Reset building states
+		this.isOnBuilding = false;
+		this.currentBuildingHeight = 0;
+		this.buildingExitTimer = 0;
+
+		// Reset physics states
+		this.coyoteTimeCounter = 0;
+		this.jumpBufferCounter = 0;
 
 		// Start animation loop
 		if (!this.animationId) {
@@ -1680,9 +2065,14 @@ export class GameEngine {
 	}
 
 	public destroy(): void {
-		if (this.animationId) {
+		if (this.animationId !== null) {
 			cancelAnimationFrame(this.animationId);
 		}
+		
+		// Clean up ladder indicators
+		this.hideLadderIndicator();
+		
+		// Dispose renderer
 		this.renderer.dispose();
 	}
 
@@ -1693,108 +2083,15 @@ export class GameEngine {
 		}
 	}
 
-	private checkClimbableStructures(): void {
-		// Check if player is near any climbable structure and trying to jump
-		if (this.keys.jump && this.playerVelocity.y > 0) {
-			// Check street lights (they're at fixed positions)
-			const streetLightPositions = [
-				[-15, 0, -15], [15, 0, -15], [-15, 0, 15], [15, 0, 15],
-				[-25, 0, -25], [25, 0, -25], [-25, 0, 25], [25, 0, 25],
-				[-35, 0, -35], [35, 0, -35], [-35, 0, 35], [35, 0, 35]
-			];
-
-			streetLightPositions.forEach(pos => {
-				const distance = this.playerGroup.position.distanceTo(new THREE.Vector3(pos[0], pos[1], pos[2]));
-				if (distance < 5) { // Increased range for easier climbing
-					// Climb onto street light
-					this.playerGroup.position.y = 8; // Street light height
-					this.playerVelocity.y = 0;
-					this.playerOnGround = true;
-				}
-			});
-
-			// Check for other climbable objects (benches, newspaper stands, etc.)
-			const climbableObjects = [
-				{ pos: [-10, 0, -10], height: 2 }, // Benches
-				{ pos: [10, 0, 10], height: 2 },
-				{ pos: [-20, 0, 20], height: 2 },
-				{ pos: [20, 0, -20], height: 2 },
-				{ pos: [-30, 0, -30], height: 3 }, // Newspaper stands
-				{ pos: [30, 0, 30], height: 3 },
-				{ pos: [-40, 0, 40], height: 3 },
-				{ pos: [40, 0, -40], height: 3 }
-			];
-
-			climbableObjects.forEach(obj => {
-				const distance = this.playerGroup.position.distanceTo(new THREE.Vector3(obj.pos[0], obj.pos[1], obj.pos[2]));
-				if (distance < 4) { // Increased range for easier climbing
-					// Climb onto object
-					this.playerGroup.position.y = obj.height + 1;
-					this.playerVelocity.y = 0;
-					this.playerOnGround = true;
-				}
-			});
-		}
-		
-		// Check if player is standing on climbable structures
-		this.checkStandingOnStructures();
-	}
-
-	private checkStandingOnStructures(): void {
-		// Check if player is standing on street lights
-		const streetLightPositions = [
-			[-15, 0, -15], [15, 0, -15], [-15, 0, 15], [15, 0, 15],
-			[-25, 0, -25], [25, 0, -25], [-25, 0, 25], [25, 0, 25],
-			[-35, 0, -35], [35, 0, -35], [-35, 0, 35], [35, 0, 35]
-		];
-
-		streetLightPositions.forEach(pos => {
-			const distance = this.playerGroup.position.distanceTo(new THREE.Vector3(pos[0], pos[1], pos[2]));
-			const playerHeight = this.playerGroup.position.y;
-			const lightHeight = 8;
-			
-			if (distance < 2.5 && playerHeight > lightHeight - 0.5 && playerHeight < lightHeight + 1.5) {
-				// Player is on street light - snap to surface
-				this.playerGroup.position.y = lightHeight + 1;
-				this.playerOnGround = true;
-				this.playerVelocity.y = 0;
-			}
-		});
-
-		// Check if player is standing on other climbable objects
-		const climbableObjects = [
-			{ pos: [-10, 0, -10], height: 2 }, // Benches
-			{ pos: [10, 0, 10], height: 2 },
-			{ pos: [-20, 0, 20], height: 2 },
-			{ pos: [20, 0, -20], height: 2 },
-			{ pos: [-30, 0, -30], height: 3 }, // Newspaper stands
-			{ pos: [30, 0, 30], height: 3 },
-			{ pos: [-40, 0, 40], height: 3 },
-			{ pos: [40, 0, -40], height: 3 }
-		];
-
-		climbableObjects.forEach(obj => {
-			const distance = this.playerGroup.position.distanceTo(new THREE.Vector3(obj.pos[0], obj.pos[1], obj.pos[2]));
-			const playerHeight = this.playerGroup.position.y;
-			
-			if (distance < 2.5 && playerHeight > obj.height - 0.5 && playerHeight < obj.height + 1.5) {
-				// Player is on object - snap to surface
-				this.playerGroup.position.y = obj.height + 1;
-				this.playerOnGround = true;
-				this.playerVelocity.y = 0;
-			}
-		});
-	}
-
 	private checkZombieBuildingCollisions(zombie: Zombie): void {
 		this.buildings.forEach(building => {
 			const buildingPos = building.mesh.position;
 			const distance = zombie.mesh.position.distanceTo(buildingPos);
 			
-			if (distance < 2) {
-				// Push zombie away from building
+			// ALWAYS push zombie away from building if too close
+			if (distance < 2.5) {
 				const direction = zombie.mesh.position.clone().sub(buildingPos).normalize();
-				zombie.mesh.position.copy(buildingPos.clone().add(direction.multiplyScalar(2)));
+				zombie.mesh.position.copy(buildingPos.clone().add(direction.multiplyScalar(3)));
 			}
 		});
 	}
@@ -1998,139 +2295,97 @@ export class GameEngine {
 		this.items.push({ mesh: itemGroup, type: itemType });
 	}
 
-	private updateItems(delta: number): void {
-		this.items.forEach((item, index) => {
-			// Rotate items
-			item.mesh.rotation.y += delta * 2;
+	private updatePlayerAnimation(deltaTime: number): void {
+		if (!this.playerParts || !this.playerGroup) return;
+		
+		// Only animate if player is moving
+		const isMoving = this.keys.up || this.keys.down || this.keys.left || this.keys.right;
+		
+		if (isMoving && !this.isClimbingLadder) {
+			// More natural walking animation with better timing
+			const walkSpeed = 6; // Slower for more natural movement
+			const walkAmplitude = 0.25; // Reduced amplitude for subtlety
+			const time = this.clock.getElapsedTime();
 			
-			// Check for collection
-			if (item.mesh.position.distanceTo(this.playerGroup.position) < 1.5) {
-				// Collect item
-				this.scene.remove(item.mesh);
-				this.items.splice(index, 1);
-				this.gameState.itemsCollected++;
-				
-				// Apply item effect
-				if (item.type === 'health') {
-					this.playerHealth = Math.min(100, this.playerHealth + 30);
-				} else if (item.type === 'weapon') {
-					// Upgrade weapon
-					this.currentWeapon = 'upgraded_bat';
-					this.addWeapon('upgraded_bat');
-				}
-			}
-		});
-	}
-
-	private staggerZombie(zombie: Zombie): void {
-		// Push zombie away from player
-		const staggerDirection = zombie.mesh.position.clone().sub(this.playerGroup.position).normalize();
-		zombie.mesh.position.add(staggerDirection.multiplyScalar(2));
-		
-		// Temporarily reduce speed
-		zombie.speed *= 0.5;
-		setTimeout(() => {
-			zombie.speed *= 2;
-		}, 1000);
-	}
-
-	private attack(): void {
-		if (this.isAttacking || this.attackCooldown > 0) return;
-		
-		this.isAttacking = true;
-		this.attackCooldown = 0.5;
-		
-		// Create 360-degree attack effect
-		this.create360AttackEffect();
-		
-		// Play attack sound
-		this.playAttackSound();
-		
-		// Check for zombie hits in a circle around player
-		const attackRadius = 3;
-		this.zombies.forEach((zombie, index) => {
-			const distance = zombie.mesh.position.distanceTo(this.playerGroup.position);
-			if (distance < attackRadius) {
-				zombie.health--;
-				if (zombie.health <= 0) {
-					this.killZombie(zombie, index);
-				} else {
-					this.staggerZombie(zombie);
-				}
-			}
-		});
-		
-		// Reset attack state
-		setTimeout(() => {
-			this.isAttacking = false;
-		}, 300);
-	}
-
-	private create360AttackEffect(): void {
-		// Create a circular attack effect around the player
-		const segments = 16;
-		const radius = 3;
-		
-		for (let i = 0; i < segments; i++) {
-			const angle = (i / segments) * Math.PI * 2;
-			const x = Math.cos(angle) * radius;
-			const z = Math.sin(angle) * radius;
+			// Use different frequencies for arms and legs to create more natural movement
+			const armFrequency = walkSpeed * 0.8; // Arms move slightly slower
+			const legFrequency = walkSpeed * 1.2; // Legs move slightly faster
 			
-			// Create attack particle
-			const particleGeometry = new THREE.SphereGeometry(0.1, 4, 4);
-			const particleMaterial = new THREE.MeshLambertMaterial({ 
-				color: 0xffaa00,
-				emissive: 0x442200,
-				transparent: true,
-				opacity: 0.8
-			});
-			const particle = new THREE.Mesh(particleGeometry, particleMaterial);
+			// Add phase offset for more realistic movement
+			const armPhase = Math.sin(time * armFrequency);
+			const legPhase = Math.sin(time * legFrequency + Math.PI * 0.1); // Slight offset
 			
-			particle.position.copy(this.playerGroup.position);
-			particle.position.x += x;
-			particle.position.z += z;
-			particle.position.y = 1;
+			// Animate arms with more natural movement
+			this.playerParts.leftArm.rotation.x = armPhase * walkAmplitude;
+			this.playerParts.rightArm.rotation.x = -armPhase * walkAmplitude;
 			
-			this.scene.add(particle);
+			// Add slight arm swing in Z direction for more realism
+			this.playerParts.leftArm.rotation.z = armPhase * 0.1;
+			this.playerParts.rightArm.rotation.z = -armPhase * 0.1;
 			
-			// Animate particle
-			const startTime = Date.now();
-			const animateParticle = () => {
-				const elapsed = (Date.now() - startTime) / 1000;
-				const progress = elapsed / 0.3; // 0.3 second animation
-				
-				if (progress < 1) {
-					// Expand outward
-					const currentRadius = radius * (1 + progress * 0.5);
-					particle.position.x = this.playerGroup.position.x + Math.cos(angle) * currentRadius;
-					particle.position.z = this.playerGroup.position.z + Math.sin(angle) * currentRadius;
-					particle.position.y = 1 + Math.sin(progress * Math.PI) * 0.5;
-					
-					// Fade out
-					particle.material.opacity = 0.8 * (1 - progress);
-					particle.scale.setScalar(1 + progress * 0.5);
-					
-					requestAnimationFrame(animateParticle);
-				} else {
-					this.scene.remove(particle);
-				}
-			};
-			animateParticle();
+			// Animate legs with more natural movement
+			this.playerParts.leftLeg.rotation.x = -legPhase * walkAmplitude;
+			this.playerParts.rightLeg.rotation.x = legPhase * walkAmplitude;
+			
+			// Animate shoes with legs
+			this.playerParts.leftShoe.rotation.x = this.playerParts.leftLeg.rotation.x;
+			this.playerParts.rightShoe.rotation.x = this.playerParts.rightLeg.rotation.x;
+			
+			// More subtle body bob with different frequency
+			const bodyBobFrequency = walkSpeed * 1.5;
+			const bodyBobAmplitude = 0.03; // Much more subtle
+			this.playerParts.body.position.y = 1.8 + Math.sin(time * bodyBobFrequency) * bodyBobAmplitude;
+			
+			// Add slight body rotation for more natural movement
+			this.playerParts.body.rotation.z = Math.sin(time * walkSpeed * 0.5) * 0.02;
+			
+		} else {
+			// Smooth transition back to idle position
+			const idleSpeed = 0.1; // Slower transition for smoother movement
+			
+			// Gradually return arms to idle
+			this.playerParts.leftArm.rotation.x *= (1 - idleSpeed);
+			this.playerParts.rightArm.rotation.x *= (1 - idleSpeed);
+			this.playerParts.leftArm.rotation.z *= (1 - idleSpeed);
+			this.playerParts.rightArm.rotation.z *= (1 - idleSpeed);
+			
+			// Gradually return legs to idle
+			this.playerParts.leftLeg.rotation.x *= (1 - idleSpeed);
+			this.playerParts.rightLeg.rotation.x *= (1 - idleSpeed);
+			this.playerParts.leftShoe.rotation.x *= (1 - idleSpeed);
+			this.playerParts.rightShoe.rotation.x *= (1 - idleSpeed);
+			
+			// Return body to idle position
+			this.playerParts.body.position.y = 1.8;
+			this.playerParts.body.rotation.z *= (1 - idleSpeed);
 		}
 		
-		// Add weapon swing animation
-		if (this.weaponMesh) {
-			const startRotation = this.weaponMesh.rotation.z;
-			const swingAnimation = () => {
-				const progress = (0.3 - this.attackCooldown) / 0.3;
-				if (progress < 1) {
-					// Full 360-degree swing
-					this.weaponMesh!.rotation.z = startRotation + progress * Math.PI * 2;
-					this.weaponMesh!.rotation.y = Math.sin(progress * Math.PI * 4) * 0.3;
-					requestAnimationFrame(swingAnimation);
-				}
-			};
-			swingAnimation();
+		// Climbing animation - more realistic climbing motion
+		if (this.isClimbingLadder) {
+			const climbSpeed = 4; // Slower for more realistic climbing
+			const climbAmplitude = 0.3;
+			const time = this.clock.getElapsedTime();
+			
+			// Alternating arm movement for realistic climbing
+			const leftArmPhase = Math.sin(time * climbSpeed);
+			const rightArmPhase = Math.sin(time * climbSpeed + Math.PI); // Opposite phase
+			
+			// Animate arms for climbing with more realistic motion
+			this.playerParts.leftArm.rotation.x = leftArmPhase * climbAmplitude;
+			this.playerParts.rightArm.rotation.x = rightArmPhase * climbAmplitude;
+			
+			// Add slight arm movement in Z for more realistic climbing
+			this.playerParts.leftArm.rotation.z = leftArmPhase * 0.15;
+			this.playerParts.rightArm.rotation.z = rightArmPhase * 0.15;
+			
+			// Keep legs straight but add slight movement for balance
+			this.playerParts.leftLeg.rotation.x = leftArmPhase * 0.1;
+			this.playerParts.rightLeg.rotation.x = rightArmPhase * 0.1;
+			this.playerParts.leftShoe.rotation.x = this.playerParts.leftLeg.rotation.x;
+			this.playerParts.rightShoe.rotation.x = this.playerParts.rightLeg.rotation.x;
+			
+			// Add slight body movement during climbing
+			this.playerParts.body.rotation.z = Math.sin(time * climbSpeed * 0.5) * 0.05;
 		}
 	}
 } 
