@@ -172,6 +172,10 @@
 					<span class="control-label">Mid-Air Control:</span>
 					<span class="control-keys">WASD (reduced speed)</span>
 				</div>
+				<div class="control-group">
+					<span class="control-label">Unstuck:</span>
+					<span class="control-keys">R (if stuck)</span>
+				</div>
 			</div>
 
 			<div class="mouse-indicator">
@@ -248,6 +252,7 @@
 					<div class="tip-item">• Zombies spawn faster over time - stay mobile!</div>
 					<div class="tip-item">• Use buildings and structures to escape from zombies</div>
 					<div class="tip-item">• Press ESC to unlock mouse and pause game</div>
+					<div class="tip-item">• Press R if you get stuck while climbing or moving</div>
 				</div>
 			</div>
 		{:else}

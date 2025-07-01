@@ -63,8 +63,8 @@ export class GameEngine {
 	private difficultyMultiplier = 1.0;
 	
 	// Map size - much larger for impressive cityscape
-	private mapSize = 120; // Increased from 80 for massive city
-	private mapBounds = 58; // Half of mapSize - 2 for safety
+	private mapSize = 200; // Much larger map for better exploration
+	private mapBounds = 98; // Half of mapSize - 2 for safety
 	
 	// Controls
 	private keys = {
@@ -81,8 +81,10 @@ export class GameEngine {
 	private mouseX = 0;
 	private mouseY = 0;
 	private isMouseDown = false;
-	private cameraDistance = 12;
-	private cameraHeight = 8;
+	private cameraDistance = 15;
+	private cameraHeight = 10;
+	private minCameraDistance = 5;
+	private maxCameraDistance = 30;
 	private cameraRotationX = 0;
 	private cameraRotationY = 0;
 	private lastMouseX = 0;
@@ -131,8 +133,16 @@ export class GameEngine {
 	// Anti-stuck system
 	private lastPlayerPosition = new THREE.Vector3();
 	private stuckTimer = 0;
-	private stuckThreshold = 0.1; // Distance threshold for stuck detection
+	private stuckThreshold = 0.05; // Distance threshold for stuck detection (reduced to be less sensitive)
 	private maxStuckTime = 2.0; // Maximum time before auto-unstuck
+	private postClimbingGracePeriod = 0; // Grace period after climbing to prevent false stuck detection
+	
+	// Damage animation system
+	private isTakingDamage = false;
+	private damageAnimationTimer = 0;
+	private damageAnimationDuration = 0.5; // Duration of damage animation in seconds
+	private lastDamageTime = 0;
+	private damageCooldown = 0.3; // Minimum time between damage animations
 
 	constructor(container: HTMLElement) {
 		console.log('GameEngine constructor called');
@@ -195,29 +205,33 @@ export class GameEngine {
 		this.camera.position.set(0, 12, 12);
 		this.camera.lookAt(0, 0, 0);
 
-		// Renderer setup - enhanced quality while keeping low-fidelity aesthetic
+		// Renderer setup - optimized for performance while maintaining quality
 		this.renderer = new THREE.WebGLRenderer({ 
-			antialias: true, // Better quality
+			antialias: false, // Disable for better performance
 			powerPreference: "default"
 		});
 		this.renderer.setSize(container.clientWidth, container.clientHeight);
-		this.renderer.setPixelRatio(1.0); // Better resolution
+		this.renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2)); // Limit pixel ratio
 		this.renderer.shadowMap.enabled = true;
-		this.renderer.shadowMap.type = THREE.PCFSoftShadowMap; // Better shadows
-		this.renderer.toneMapping = THREE.ACESFilmicToneMapping; // Better color grading
-		this.renderer.toneMappingExposure = 1.2;
+		this.renderer.shadowMap.type = THREE.BasicShadowMap; // Use basic shadows for performance
+		this.renderer.toneMapping = THREE.NoToneMapping; // Disable tone mapping for performance
 		container.appendChild(this.renderer.domElement);
 
-		// Ground - much larger street
+		// Ground - realistic asphalt street
 		const groundGeometry = new THREE.PlaneGeometry(this.mapSize, this.mapSize);
 		const groundMaterial = new THREE.MeshLambertMaterial({ 
-			color: 0x222222
+			color: 0x1a1a1a, // Darker asphalt color
+			emissive: 0x0a0a0a,
+			emissiveIntensity: 0.1
 		});
 		const ground = new THREE.Mesh(groundGeometry, groundMaterial);
 		ground.rotation.x = -Math.PI / 2;
 		ground.position.y = -0.5;
 		ground.receiveShadow = true;
 		this.scene.add(ground);
+		
+		// Add sidewalk areas
+		this.addSidewalks();
 
 		// Add street markings for larger map
 		this.addStreetMarkings();
@@ -230,18 +244,65 @@ export class GameEngine {
 		});
 	}
 
+	private addSidewalks(): void {
+		// Add realistic sidewalks around the street
+		const sidewalkGeometry = new THREE.PlaneGeometry(this.mapSize, 4);
+		const sidewalkMaterial = new THREE.MeshLambertMaterial({ 
+			color: 0x666666, // Concrete color
+			emissive: 0x222222,
+			emissiveIntensity: 0.1
+		});
+		
+		// Left sidewalk
+		const leftSidewalk = new THREE.Mesh(sidewalkGeometry, sidewalkMaterial);
+		leftSidewalk.rotation.x = -Math.PI / 2;
+		leftSidewalk.position.set(0, -0.3, -this.mapSize/2 + 2);
+		leftSidewalk.receiveShadow = true;
+		this.scene.add(leftSidewalk);
+		
+		// Right sidewalk
+		const rightSidewalk = new THREE.Mesh(sidewalkGeometry, sidewalkMaterial);
+		rightSidewalk.rotation.x = -Math.PI / 2;
+		rightSidewalk.position.set(0, -0.3, this.mapSize/2 - 2);
+		rightSidewalk.receiveShadow = true;
+		this.scene.add(rightSidewalk);
+		
+		// Top sidewalk
+		const topSidewalkGeometry = new THREE.PlaneGeometry(4, this.mapSize);
+		const topSidewalk = new THREE.Mesh(topSidewalkGeometry, sidewalkMaterial);
+		topSidewalk.rotation.x = -Math.PI / 2;
+		topSidewalk.position.set(-this.mapSize/2 + 2, -0.3, 0);
+		topSidewalk.receiveShadow = true;
+		this.scene.add(topSidewalk);
+		
+		// Bottom sidewalk
+		const bottomSidewalk = new THREE.Mesh(topSidewalkGeometry, sidewalkMaterial);
+		bottomSidewalk.rotation.x = -Math.PI / 2;
+		bottomSidewalk.position.set(this.mapSize/2 - 2, -0.3, 0);
+		bottomSidewalk.receiveShadow = true;
+		this.scene.add(bottomSidewalk);
+	}
+	
 	private addStreetMarkings(): void {
 		// Center line - longer for larger map
 		const lineGeometry = new THREE.PlaneGeometry(0.4, this.mapSize);
-		const lineMaterial = new THREE.MeshLambertMaterial({ color: 0xffff00 });
+		const lineMaterial = new THREE.MeshLambertMaterial({ 
+			color: 0xffff00,
+			emissive: 0x222200,
+			emissiveIntensity: 0.2
+		});
 		const centerLine = new THREE.Mesh(lineGeometry, lineMaterial);
 		centerLine.rotation.x = -Math.PI / 2;
 		centerLine.position.y = -0.4;
 		this.scene.add(centerLine);
 
-		// Side lines - multiple lanes
+		// Side lines - multiple lanes with better materials
 		const sideLineGeometry = new THREE.PlaneGeometry(0.2, this.mapSize);
-		const sideLineMaterial = new THREE.MeshLambertMaterial({ color: 0xffffff });
+		const sideLineMaterial = new THREE.MeshLambertMaterial({ 
+			color: 0xffffff,
+			emissive: 0x222222,
+			emissiveIntensity: 0.1
+		});
 		
 		// Multiple lanes
 		const lanePositions = [-12, -6, 6, 12];
@@ -252,14 +313,32 @@ export class GameEngine {
 			this.scene.add(leftLine);
 		});
 
-		// Crosswalks
-		for (let i = -30; i <= 30; i += 15) {
-			const crosswalkGeometry = new THREE.PlaneGeometry(8, 0.3);
-			const crosswalkMaterial = new THREE.MeshLambertMaterial({ color: 0xffffff });
+		// Realistic crosswalks with better spacing
+		for (let i = -45; i <= 45; i += 20) {
+			const crosswalkGeometry = new THREE.PlaneGeometry(10, 0.4);
+			const crosswalkMaterial = new THREE.MeshLambertMaterial({ 
+				color: 0xffffff,
+				emissive: 0x222222,
+				emissiveIntensity: 0.1
+			});
 			const crosswalk = new THREE.Mesh(crosswalkGeometry, crosswalkMaterial);
 			crosswalk.rotation.x = -Math.PI / 2;
 			crosswalk.position.set(0, -0.4, i);
 			this.scene.add(crosswalk);
+		}
+		
+		// Add stop lines at intersections
+		for (let i = -45; i <= 45; i += 20) {
+			const stopLineGeometry = new THREE.PlaneGeometry(0.3, 16);
+			const stopLineMaterial = new THREE.MeshLambertMaterial({ 
+				color: 0xffffff,
+				emissive: 0x222222,
+				emissiveIntensity: 0.1
+			});
+			const stopLine = new THREE.Mesh(stopLineGeometry, stopLineMaterial);
+			stopLine.rotation.x = -Math.PI / 2;
+			stopLine.position.set(0, -0.4, i + 8);
+			this.scene.add(stopLine);
 		}
 	}
 
@@ -461,54 +540,74 @@ export class GameEngine {
 	}
 
 	private initCity(): void {
-		// Create massive city with huge buildings - impressive scale
+		// Create massive city with properly spaced buildings and streets between them
 		const buildingPositions = [
-			// Downtown area - massive skyscrapers with strategic spacing
-			{ x: -30, z: -30, height: 35, climbable: true, type: 'skyscraper' },
-			{ x: 30, z: -30, height: 42, climbable: true, type: 'skyscraper' },
-			{ x: -30, z: 30, height: 28, climbable: true, type: 'skyscraper' },
-			{ x: 30, z: 30, height: 45, climbable: true, type: 'skyscraper' },
-			{ x: 0, z: -40, height: 38, climbable: true, type: 'skyscraper' },
-			{ x: -40, z: 0, height: 32, climbable: true, type: 'skyscraper' },
-			{ x: 40, z: 0, height: 25, climbable: true, type: 'skyscraper' },
+			// Downtown area - massive skyscrapers with wide streets
+			{ x: -80, z: -80, height: 45, climbable: true, type: 'skyscraper' },
+			{ x: 80, z: -80, height: 52, climbable: true, type: 'skyscraper' },
+			{ x: -80, z: 80, height: 38, climbable: true, type: 'skyscraper' },
+			{ x: 80, z: 80, height: 55, climbable: true, type: 'skyscraper' },
+			{ x: 0, z: -90, height: 48, climbable: true, type: 'skyscraper' },
+			{ x: -90, z: 0, height: 42, climbable: true, type: 'skyscraper' },
+			{ x: 90, z: 0, height: 35, climbable: true, type: 'skyscraper' },
+			{ x: 0, z: 90, height: 40, climbable: true, type: 'skyscraper' },
 			
-			// Mid-rise buildings - well-spaced for parkour opportunities
-			{ x: -18, z: -18, height: 20, climbable: true, type: 'office' },
-			{ x: 18, z: -18, height: 24, climbable: true, type: 'apartment' },
-			{ x: -18, z: 18, height: 16, climbable: false, type: 'shop' },
-			{ x: 18, z: 18, height: 22, climbable: true, type: 'office' },
-			{ x: -12, z: -28, height: 18, climbable: true, type: 'apartment' },
-			{ x: 12, z: -28, height: 26, climbable: true, type: 'office' },
-			{ x: -28, z: -12, height: 21, climbable: true, type: 'apartment' },
-			{ x: 28, z: -12, height: 15, climbable: false, type: 'shop' },
-			{ x: -28, z: 12, height: 23, climbable: true, type: 'office' },
-			{ x: 28, z: 12, height: 19, climbable: true, type: 'apartment' },
+			// Mid-rise buildings - properly spaced with streets
+			{ x: -50, z: -50, height: 25, climbable: true, type: 'office' },
+			{ x: 50, z: -50, height: 28, climbable: true, type: 'apartment' },
+			{ x: -50, z: 50, height: 22, climbable: false, type: 'shop' },
+			{ x: 50, z: 50, height: 30, climbable: true, type: 'office' },
+			{ x: -40, z: -60, height: 24, climbable: true, type: 'apartment' },
+			{ x: 40, z: -60, height: 32, climbable: true, type: 'office' },
+			{ x: -60, z: -40, height: 26, climbable: true, type: 'apartment' },
+			{ x: 60, z: -40, height: 20, climbable: false, type: 'shop' },
+			{ x: -60, z: 40, height: 28, climbable: true, type: 'office' },
+			{ x: 60, z: 40, height: 24, climbable: true, type: 'apartment' },
 			
-			// Residential area - medium buildings with good spacing
-			{ x: -50, z: -50, height: 12, climbable: true, type: 'house' },
-			{ x: 50, z: -50, height: 10, climbable: true, type: 'house' },
-			{ x: -50, z: 50, height: 11, climbable: true, type: 'house' },
-			{ x: 50, z: 50, height: 9, climbable: true, type: 'house' },
-			{ x: -55, z: 0, height: 13, climbable: true, type: 'house' },
-			{ x: 55, z: 0, height: 8, climbable: true, type: 'house' },
-			{ x: 0, z: -55, height: 14, climbable: true, type: 'house' },
-			{ x: 0, z: 55, height: 7, climbable: true, type: 'house' },
+			// Residential area - medium buildings with wide streets
+			{ x: -120, z: -120, height: 15, climbable: true, type: 'house' },
+			{ x: 120, z: -120, height: 12, climbable: true, type: 'house' },
+			{ x: -120, z: 120, height: 14, climbable: true, type: 'house' },
+			{ x: 120, z: 120, height: 11, climbable: true, type: 'house' },
+			{ x: -130, z: 0, height: 16, climbable: true, type: 'house' },
+			{ x: 130, z: 0, height: 10, climbable: true, type: 'house' },
+			{ x: 0, z: -130, height: 17, climbable: true, type: 'house' },
+			{ x: 0, z: 130, height: 9, climbable: true, type: 'house' },
 			
-			// Additional mid-rise buildings for more exploration - strategic positioning
-			{ x: -9, z: 24, height: 19, climbable: true, type: 'apartment' },
-			{ x: 9, z: 24, height: 13, climbable: false, type: 'shop' },
-			{ x: -24, z: -9, height: 20, climbable: true, type: 'office' },
-			{ x: 24, z: -9, height: 17, climbable: true, type: 'apartment' },
-			{ x: -24, z: 9, height: 14, climbable: false, type: 'shop' },
-			{ x: 24, z: 9, height: 25, climbable: true, type: 'office' },
+			// Additional mid-rise buildings - properly spaced
+			{ x: -30, z: 45, height: 23, climbable: true, type: 'apartment' },
+			{ x: 30, z: 45, height: 18, climbable: false, type: 'shop' },
+			{ x: -45, z: -30, height: 25, climbable: true, type: 'office' },
+			{ x: 45, z: -30, height: 21, climbable: true, type: 'apartment' },
+			{ x: -45, z: 30, height: 19, climbable: false, type: 'shop' },
+			{ x: 45, z: 30, height: 29, climbable: true, type: 'office' },
 			
-			// Strategic corner buildings for parkour routes
-			{ x: -21, z: -21, height: 27, climbable: true, type: 'office' },
-			{ x: 21, z: -21, height: 18, climbable: true, type: 'apartment' },
-			{ x: -21, z: 21, height: 16, climbable: false, type: 'shop' },
-			{ x: 21, z: 21, height: 29, climbable: true, type: 'office' }
+			// Strategic corner buildings - properly spaced
+			{ x: -42, z: -42, height: 31, climbable: true, type: 'office' },
+			{ x: 42, z: -42, height: 22, climbable: true, type: 'apartment' },
+			{ x: -42, z: 42, height: 20, climbable: false, type: 'shop' },
+			{ x: 42, z: 42, height: 33, climbable: true, type: 'office' },
+			
+			// Additional buildings for larger map coverage
+			{ x: -25, z: -25, height: 18, climbable: true, type: 'apartment' },
+			{ x: 25, z: -25, height: 16, climbable: false, type: 'shop' },
+			{ x: -25, z: 25, height: 19, climbable: true, type: 'office' },
+			{ x: 25, z: 25, height: 21, climbable: true, type: 'apartment' },
+			
+			// Outer ring buildings
+			{ x: -90, z: -40, height: 12, climbable: true, type: 'house' },
+			{ x: 90, z: -40, height: 13, climbable: true, type: 'house' },
+			{ x: -90, z: 40, height: 11, climbable: true, type: 'house' },
+			{ x: 90, z: 40, height: 14, climbable: true, type: 'house' },
+			{ x: -40, z: -90, height: 15, climbable: true, type: 'house' },
+			{ x: 40, z: -90, height: 10, climbable: true, type: 'house' },
+			{ x: -40, z: 90, height: 12, climbable: true, type: 'house' },
+			{ x: 40, z: 90, height: 13, climbable: true, type: 'house' }
 		];
 
+		// Validate building spacing before creating buildings
+		this.validateBuildingSpacing(buildingPositions);
+		
 		buildingPositions.forEach(pos => {
 			this.createBuilding(pos);
 		});
@@ -521,6 +620,29 @@ export class GameEngine {
 		
 		// Add rooftop structures for more exploration
 		this.addRooftopStructures();
+		
+		// Add building accent lighting after all buildings are created
+		this.addBuildingAccentLights();
+	}
+	
+	private validateBuildingSpacing(buildingPositions: any[]): void {
+		// Validate that buildings are properly spaced to avoid conflicts
+		// Buildings are now 30 units wide at base, so need much more spacing for streets
+		const minSpacing = 60; // Much larger minimum distance for proper streets between buildings
+		
+		for (let i = 0; i < buildingPositions.length; i++) {
+			for (let j = i + 1; j < buildingPositions.length; j++) {
+				const pos1 = buildingPositions[i];
+				const pos2 = buildingPositions[j];
+				const distance = Math.sqrt(
+					Math.pow(pos1.x - pos2.x, 2) + Math.pow(pos1.z - pos2.z, 2)
+				);
+				
+				if (distance < minSpacing) {
+					console.warn(`Building spacing issue: Buildings at (${pos1.x}, ${pos1.z}) and (${pos2.x}, ${pos2.z}) are only ${distance.toFixed(2)} units apart (minimum: ${minSpacing})`);
+				}
+			}
+		}
 	}
 
 	private addRooftopStructures(): void {
@@ -581,19 +703,34 @@ export class GameEngine {
 	private createBuilding(buildingData: any): void {
 		const { x, z, height, climbable, type } = buildingData;
 		
-		// Main building structure - much larger for impressive scale
-		const buildingGeometry = new THREE.BoxGeometry(4, height, 4); // Increased from 2x2 to 4x4
+		// Create tapered building geometry - 5 times wider at base than top
+		const topWidth = 6; // Width at the top (rooftop running space)
+		const baseWidth = topWidth * 5; // Width at the base (30 units)
+		
+		// Use simple box geometry for now to ensure visibility
+		const buildingGeometry = new THREE.BoxGeometry(baseWidth, height, baseWidth);
+		
+		// Create much more realistic building material with better textures
 		const buildingMaterial = new THREE.MeshLambertMaterial({ 
-			color: this.getBuildingColor(type)
+			color: this.getBuildingColor(type),
+			emissive: this.getBuildingEmissiveColor(type),
+			emissiveIntensity: 0.2
 		});
+		
 		const building = new THREE.Mesh(buildingGeometry, buildingMaterial);
 		building.position.set(x, height / 2, z);
 		building.castShadow = true;
 		building.receiveShadow = true;
 		this.scene.add(building);
 
-		// Add building details
+		// Add comprehensive architectural details
+		this.addArchitecturalDetails(building, type, height);
+		
+		// Add detailed building features (windows, balconies, etc.)
 		this.addBuildingDetails(building, type, height);
+		
+		// Add rooftop structures and details
+		this.addRooftopStructures();
 
 		// Add ladder if building is climbable
 		let ladder: THREE.Mesh | undefined;
@@ -608,9 +745,100 @@ export class GameEngine {
 			ladder: ladder
 		});
 	}
+	
+	private createTaperedBuildingGeometry(baseWidth: number, topWidth: number, height: number): THREE.BufferGeometry {
+		// Create a more realistic building geometry with architectural details
+		const geometry = new THREE.BufferGeometry();
+		
+		// Define the vertices for a realistic building
+		const vertices = [];
+		const indices = [];
+		const uvs = [];
+		
+		// Create more segments for smoother tapering and architectural details
+		const segments = 16; // More segments for smoother appearance
+		
+		for (let i = 0; i <= segments; i++) {
+			const y = (i / segments) * height;
+			const progress = i / segments;
+			
+			// Calculate width at this height with more realistic tapering curve
+			// Use a curved interpolation for more natural building shape
+			const curveProgress = Math.pow(progress, 1.5); // Curved tapering
+			const currentWidth = baseWidth + (topWidth - baseWidth) * curveProgress;
+			const halfWidth = currentWidth / 2;
+			
+			// Create 4 vertices at this height (one for each corner)
+			// Front face
+			vertices.push(-halfWidth, y, halfWidth);  // 0
+			vertices.push(halfWidth, y, halfWidth);   // 1
+			// Back face
+			vertices.push(-halfWidth, y, -halfWidth); // 2
+			vertices.push(halfWidth, y, -halfWidth);  // 3
+			
+			// UVs for texturing - repeat texture vertically for realistic appearance
+			const uvY = progress * 4; // Repeat texture 4 times vertically
+			uvs.push(0, uvY);
+			uvs.push(1, uvY);
+			uvs.push(0, uvY);
+			uvs.push(1, uvY);
+		}
+		
+		// Create indices for the building sides
+		for (let i = 0; i < segments; i++) {
+			const baseIndex = i * 4;
+			const nextBaseIndex = (i + 1) * 4;
+			
+			// Front face
+			indices.push(baseIndex, baseIndex + 1, nextBaseIndex);
+			indices.push(nextBaseIndex, baseIndex + 1, nextBaseIndex + 1);
+			
+			// Back face
+			indices.push(baseIndex + 2, baseIndex + 3, nextBaseIndex + 2);
+			indices.push(nextBaseIndex + 2, baseIndex + 3, nextBaseIndex + 3);
+			
+			// Left face
+			indices.push(baseIndex, baseIndex + 2, nextBaseIndex);
+			indices.push(nextBaseIndex, baseIndex + 2, nextBaseIndex + 2);
+			
+			// Right face
+			indices.push(baseIndex + 1, baseIndex + 3, nextBaseIndex + 1);
+			indices.push(nextBaseIndex + 1, baseIndex + 3, nextBaseIndex + 3);
+		}
+		
+		// Add top face (flat roof)
+		const topBaseIndex = segments * 4;
+		const topHalfWidth = topWidth / 2;
+		
+		// Top face vertices
+		vertices.push(-topHalfWidth, height, -topHalfWidth); // 0
+		vertices.push(topHalfWidth, height, -topHalfWidth);  // 1
+		vertices.push(-topHalfWidth, height, topHalfWidth);  // 2
+		vertices.push(topHalfWidth, height, topHalfWidth);   // 3
+		
+		// Top face UVs
+		uvs.push(0, 0);
+		uvs.push(1, 0);
+		uvs.push(0, 1);
+		uvs.push(1, 1);
+		
+		// Top face indices
+		indices.push(topBaseIndex, topBaseIndex + 1, topBaseIndex + 2);
+		indices.push(topBaseIndex + 2, topBaseIndex + 1, topBaseIndex + 3);
+		
+		// Set geometry attributes
+		geometry.setAttribute('position', new THREE.Float32BufferAttribute(vertices, 3));
+		geometry.setAttribute('uv', new THREE.Float32BufferAttribute(uvs, 2));
+		geometry.setIndex(indices);
+		
+		// Compute normals for proper lighting
+		geometry.computeVertexNormals();
+		
+		return geometry;
+	}
 
 	private createLadder(x: number, z: number, buildingHeight: number): THREE.Mesh {
-		// Create ladder geometry - much larger for 4x4 buildings
+		// Create ladder geometry - much larger for 6x6 buildings
 		const ladderGroup = new THREE.Group();
 		
 		// Ladder sides (vertical rails) - much larger and more visible
@@ -654,9 +882,10 @@ export class GameEngine {
 		glow.position.set(0, buildingHeight / 2, 0);
 		ladderGroup.add(glow);
 		
-		// Position ladder properly outside the 4x4 building - much further out
-		ladderGroup.position.set(x + 3.5, 0, z); // Much further from building to avoid collision
-		ladderGroup.rotation.y = Math.PI / 2; // Rotate 90 degrees to face outward from building
+		// Position ladder on the side of the building (not in front)
+		// Place ladder on the right side of the building
+		ladderGroup.position.set(x + 15.5, 0, z); // 15.5 units from center (half building width + ladder offset)
+		ladderGroup.rotation.y = 0; // No rotation - ladder faces the side of the building
 		ladderGroup.castShadow = true;
 		this.scene.add(ladderGroup);
 		
@@ -666,80 +895,345 @@ export class GameEngine {
 
 	private getBuildingColor(type: string): number {
 		switch (type) {
-			case 'office': return 0x666666;
-			case 'apartment': return 0x888888;
-			case 'shop': return 0xaa6666;
-			case 'skyscraper': return 0x444444;
-			case 'house': return 0x886666;
-			default: return 0x666666;
+			case 'office': return 0x666666; // Lighter gray for better visibility
+			case 'apartment': return 0x888888; // Lighter gray for residential
+			case 'shop': return 0xaa6633; // Lighter brown for commercial buildings
+			case 'skyscraper': return 0x444444; // Lighter dark gray for modern skyscrapers
+			case 'house': return 0xaa8866; // Lighter warm brown for houses
+			default: return 0x777777;
+		}
+	}
+	
+	private getBuildingEmissiveColor(type: string): number {
+		switch (type) {
+			case 'office': return 0x222222;
+			case 'apartment': return 0x333333;
+			case 'shop': return 0x442222;
+			case 'skyscraper': return 0x111111;
+			case 'house': return 0x332222;
+			default: return 0x222222;
+		}
+	}
+	
+	private addArchitecturalDetails(building: THREE.Mesh, type: string, height: number): void {
+		// Add simplified architectural elements for better performance
+		
+		// Add corner pillars/columns
+		this.addCornerPillars(building, height);
+		
+		// Add entrance details
+		this.addEntranceDetails(building, type);
+		
+		// Add rooftop details based on building type
+		this.addRooftopDetails(building, type, height);
+	}
+	
+	private addCornerPillars(building: THREE.Mesh, height: number): void {
+		// Add simplified corner pillars for architectural detail
+		const pillarGeometry = new THREE.BoxGeometry(0.8, height, 0.8);
+		const pillarMaterial = new THREE.MeshLambertMaterial({ 
+			color: 0x333333,
+			emissive: 0x111111
+		});
+		
+		// Calculate building width at different heights for pillar positioning
+		const topWidth = 6;
+		const baseWidth = topWidth * 5;
+		
+		// Add pillars at corners
+		const pillarPositions = [
+			{ x: -baseWidth/2 + 0.4, z: -baseWidth/2 + 0.4 }, // Bottom left
+			{ x: baseWidth/2 - 0.4, z: -baseWidth/2 + 0.4 },  // Bottom right
+			{ x: -baseWidth/2 + 0.4, z: baseWidth/2 - 0.4 },  // Top left
+			{ x: baseWidth/2 - 0.4, z: baseWidth/2 - 0.4 }    // Top right
+		];
+		
+		pillarPositions.forEach(pos => {
+			const pillar = new THREE.Mesh(pillarGeometry, pillarMaterial);
+			pillar.position.set(pos.x, height/2, pos.z);
+			building.add(pillar);
+		});
+	}
+	
+	private addHorizontalBands(building: THREE.Mesh, height: number): void {
+		// Add horizontal architectural bands
+		const bandGeometry = new THREE.BoxGeometry(30, 0.3, 30);
+		const bandMaterial = new THREE.MeshLambertMaterial({ 
+			color: 0x555555,
+			emissive: 0x222222
+		});
+		
+		// Add bands at regular intervals
+		const bandCount = Math.floor(height / 8);
+		for (let i = 1; i <= bandCount; i++) {
+			const band = new THREE.Mesh(bandGeometry, bandMaterial);
+			band.position.y = (i * height / (bandCount + 1)) - height/2;
+			building.add(band);
+		}
+	}
+	
+	private addEntranceDetails(building: THREE.Mesh, type: string): void {
+		// Add simplified entrance details at the base
+		const entranceGeometry = new THREE.BoxGeometry(3, 2.5, 1.5);
+		const entranceMaterial = new THREE.MeshLambertMaterial({ 
+			color: 0x333333,
+			emissive: 0x111111
+		});
+		
+		const entrance = new THREE.Mesh(entranceGeometry, entranceMaterial);
+		entrance.position.set(0, 1.25, 15.75); // Front entrance
+		building.add(entrance);
+	}
+	
+	private addRooftopDetails(building: THREE.Mesh, type: string, height: number): void {
+		// Add simplified rooftop architectural elements
+		switch (type) {
+			case 'skyscraper':
+				// Add antenna/spire
+				const antennaGeometry = new THREE.CylinderGeometry(0.2, 0.2, 6);
+				const antennaMaterial = new THREE.MeshLambertMaterial({ color: 0x666666 });
+				const antenna = new THREE.Mesh(antennaGeometry, antennaMaterial);
+				antenna.position.set(0, height/2 + 3, 0);
+				building.add(antenna);
+				break;
+				
+			case 'office':
+				// Add rooftop garden/terrace
+				const terraceGeometry = new THREE.BoxGeometry(3, 0.3, 3);
+				const terraceMaterial = new THREE.MeshLambertMaterial({ color: 0x228822 });
+				const terrace = new THREE.Mesh(terraceGeometry, terraceMaterial);
+				terrace.position.set(0, height/2 + 0.15, 0);
+				building.add(terrace);
+				break;
+				
+			case 'apartment':
+				// Add water tank
+				const tankGeometry = new THREE.CylinderGeometry(0.8, 0.8, 1.5);
+				const tankMaterial = new THREE.MeshLambertMaterial({ color: 0x444444 });
+				const tank = new THREE.Mesh(tankGeometry, tankMaterial);
+				tank.position.set(0, height/2 + 0.75, 0);
+				building.add(tank);
+				break;
+		}
+	}
+	
+	private addFacadeDetails(building: THREE.Mesh, type: string, height: number): void {
+		// Add detailed facade elements to make buildings look more realistic
+		
+		// Add decorative panels
+		const panelGeometry = new THREE.PlaneGeometry(2, 1);
+		const panelMaterial = new THREE.MeshLambertMaterial({ 
+			color: 0x555555,
+			emissive: 0x222222
+		});
+		
+		// Add panels at regular intervals
+		for (let y = 3; y < height - 3; y += 6) {
+			const progress = y / height;
+			const topWidth = 6;
+			const baseWidth = topWidth * 5;
+			const currentWidth = baseWidth + (topWidth - baseWidth) * progress;
+			const halfWidth = currentWidth / 2;
+			
+			// Front facade panels
+			for (let x = -halfWidth + 2; x <= halfWidth - 2; x += 4) {
+				const panel = new THREE.Mesh(panelGeometry, panelMaterial);
+				panel.position.set(x, y, halfWidth + 0.05);
+				building.add(panel);
+			}
+			
+			// Side facade panels
+			for (let z = -halfWidth + 2; z <= halfWidth - 2; z += 4) {
+				const leftPanel = new THREE.Mesh(panelGeometry, panelMaterial);
+				leftPanel.position.set(-halfWidth - 0.05, y, z);
+				leftPanel.rotation.y = Math.PI / 2;
+				building.add(leftPanel);
+				
+				const rightPanel = new THREE.Mesh(panelGeometry, panelMaterial);
+				rightPanel.position.set(halfWidth + 0.05, y, z);
+				rightPanel.rotation.y = -Math.PI / 2;
+				building.add(rightPanel);
+			}
+		}
+		
+		// Add building signage for commercial buildings
+		if (type === 'shop' || type === 'office') {
+			const signGeometry = new THREE.PlaneGeometry(3, 0.8);
+			const signMaterial = new THREE.MeshLambertMaterial({ 
+				color: 0x888888,
+				emissive: 0x444444
+			});
+			
+			const sign = new THREE.Mesh(signGeometry, signMaterial);
+			sign.position.set(0, height - 2, 15.5);
+			building.add(sign);
+			
+			// Add sign lighting
+			const signLight = new THREE.PointLight(0xffffaa, 0.4, 3);
+			signLight.position.set(0, height - 1.5, 16);
+			building.add(signLight);
 		}
 	}
 
 	private addBuildingDetails(building: THREE.Mesh, type: string, height: number): void {
-		// Add windows - scaled for larger buildings
-		const windowGeometry = new THREE.PlaneGeometry(0.6, 0.8); // Larger windows for bigger buildings
+		// Add simplified but still detailed windows for better performance
+		const windowGeometry = new THREE.PlaneGeometry(0.8, 1.2);
 		const windowMaterial = new THREE.MeshLambertMaterial({ 
 			color: 0x87ceeb,
+			emissive: 0x222222,
+			transparent: true,
+			opacity: 0.8
+		});
+
+		// Add window frames
+		const frameGeometry = new THREE.PlaneGeometry(1.0, 1.4);
+		const frameMaterial = new THREE.MeshLambertMaterial({ 
+			color: 0x333333,
 			emissive: 0x111111
 		});
 
-		// Add windows on each side - multiple windows per side for larger buildings
-		for (let y = 0.5; y < height - 0.5; y += 0.8) {
-			// Front windows - multiple windows per side
-			for (let x = -1.5; x <= 1.5; x += 1.5) {
+		// Add windows on each side - reduced frequency for performance
+		for (let y = 2; y < height - 2; y += 2.5) { // Increased spacing
+			const progress = y / height;
+			const topWidth = 6;
+			const baseWidth = topWidth * 5;
+			const currentWidth = baseWidth + (topWidth - baseWidth) * progress;
+			const halfWidth = currentWidth / 2;
+			
+			// Calculate window spacing based on current building width
+			const windowSpacing = Math.max(3.0, currentWidth / 4); // Reduced frequency
+			const maxOffset = halfWidth - 1.0;
+			
+			// Front windows - fewer windows per side
+			for (let x = -maxOffset; x <= maxOffset; x += windowSpacing) {
+				// Window frame
+				const frontFrame = new THREE.Mesh(frameGeometry, frameMaterial);
+				frontFrame.position.set(x, y, halfWidth + 0.02);
+				building.add(frontFrame);
+				
+				// Window glass
 				const frontWindow = new THREE.Mesh(windowGeometry, windowMaterial);
-				frontWindow.position.set(x, y, 2.01);
+				frontWindow.position.set(x, y, halfWidth + 0.03);
 				building.add(frontWindow);
 
 				// Back windows
+				const backFrame = new THREE.Mesh(frameGeometry, frameMaterial);
+				backFrame.position.set(x, y, -halfWidth - 0.02);
+				backFrame.rotation.y = Math.PI;
+				building.add(backFrame);
+				
 				const backWindow = new THREE.Mesh(windowGeometry, windowMaterial);
-				backWindow.position.set(x, y, -2.01);
+				backWindow.position.set(x, y, -halfWidth - 0.03);
 				backWindow.rotation.y = Math.PI;
 				building.add(backWindow);
 			}
 
-			// Side windows - multiple windows per side
-			for (let z = -1.5; z <= 1.5; z += 1.5) {
+			// Side windows - fewer windows per side
+			for (let z = -maxOffset; z <= maxOffset; z += windowSpacing) {
+				// Left side
+				const leftFrame = new THREE.Mesh(frameGeometry, frameMaterial);
+				leftFrame.position.set(-halfWidth - 0.02, y, z);
+				leftFrame.rotation.y = Math.PI / 2;
+				building.add(leftFrame);
+				
 				const leftWindow = new THREE.Mesh(windowGeometry, windowMaterial);
-				leftWindow.position.set(-2.01, y, z);
+				leftWindow.position.set(-halfWidth - 0.03, y, z);
 				leftWindow.rotation.y = Math.PI / 2;
 				building.add(leftWindow);
 
+				// Right side
+				const rightFrame = new THREE.Mesh(frameGeometry, frameMaterial);
+				rightFrame.position.set(halfWidth + 0.02, y, z);
+				rightFrame.rotation.y = -Math.PI / 2;
+				building.add(rightFrame);
+				
 				const rightWindow = new THREE.Mesh(windowGeometry, windowMaterial);
-				rightWindow.position.set(2.01, y, z);
+				rightWindow.position.set(halfWidth + 0.03, y, z);
 				rightWindow.rotation.y = -Math.PI / 2;
 				building.add(rightWindow);
 			}
 		}
 
-		// Add roof details for taller buildings
+		// Add simplified roof details
 		if (height > 3) {
-			const roofGeometry = new THREE.BoxGeometry(4.2, 0.2, 4.2); // Larger roof for bigger buildings
-			const roofMaterial = new THREE.MeshLambertMaterial({ color: 0x333333 });
+			// Main roof
+			const roofGeometry = new THREE.BoxGeometry(6.2, 0.3, 6.2);
+			const roofMaterial = new THREE.MeshLambertMaterial({ 
+				color: 0x333333,
+				emissive: 0x111111
+			});
 			const roof = new THREE.Mesh(roofGeometry, roofMaterial);
-			roof.position.y = height / 2 + 0.1;
+			roof.position.y = height / 2 + 0.15;
 			building.add(roof);
+		}
+	}
+	
+	private addBalconies(building: THREE.Mesh, height: number): void {
+		// Add balconies for apartment buildings
+		const balconyGeometry = new THREE.BoxGeometry(2, 0.2, 1.5);
+		const balconyMaterial = new THREE.MeshLambertMaterial({ 
+			color: 0x666666,
+			emissive: 0x333333
+		});
+		
+		const railingGeometry = new THREE.BoxGeometry(2.2, 0.8, 0.1);
+		const railingMaterial = new THREE.MeshLambertMaterial({ 
+			color: 0x444444,
+			emissive: 0x222222
+		});
+		
+		// Add balconies at different heights
+		for (let y = 4; y < height - 4; y += 4) {
+			const progress = y / height;
+			const topWidth = 6;
+			const baseWidth = topWidth * 5;
+			const currentWidth = baseWidth + (topWidth - baseWidth) * progress;
+			const halfWidth = currentWidth / 2;
+			
+			// Add balcony on front side
+			const balcony = new THREE.Mesh(balconyGeometry, balconyMaterial);
+			balcony.position.set(0, y, halfWidth + 0.75);
+			building.add(balcony);
+			
+			// Add railing
+			const railing = new THREE.Mesh(railingGeometry, railingMaterial);
+			railing.position.set(0, y + 0.5, halfWidth + 0.75);
+			building.add(railing);
+			
+			// Add side railings
+			const sideRailingGeometry = new THREE.BoxGeometry(0.1, 0.8, 1.6);
+			const leftRailing = new THREE.Mesh(sideRailingGeometry, railingMaterial);
+			leftRailing.position.set(-1.1, y + 0.5, halfWidth + 0.75);
+			building.add(leftRailing);
+			
+			const rightRailing = new THREE.Mesh(sideRailingGeometry, railingMaterial);
+			rightRailing.position.set(1.1, y + 0.5, halfWidth + 0.75);
+			building.add(rightRailing);
 		}
 	}
 
 	private addStreetLights(): void {
-		// Add street lights throughout the massive map - updated for new building layout
+		// Add street lights throughout the massive map - updated for larger map
 		const lightPositions = [
 			// Main intersections - updated for new building positions
-			{ x: -18, z: -18 }, { x: 18, z: -18 }, { x: -18, z: 18 }, { x: 18, z: 18 },
 			{ x: -30, z: -30 }, { x: 30, z: -30 }, { x: -30, z: 30 }, { x: 30, z: 30 },
-			{ x: 0, z: -40 }, { x: 0, z: 40 }, { x: -40, z: 0 }, { x: 40, z: 0 },
+			{ x: -50, z: -50 }, { x: 50, z: -50 }, { x: -50, z: 50 }, { x: 50, z: 50 },
+			{ x: 0, z: -60 }, { x: 0, z: 60 }, { x: -60, z: 0 }, { x: 60, z: 0 },
 			
 			// Additional lights for better coverage - updated positions
-			{ x: -12, z: -28 }, { x: 12, z: -28 }, { x: -28, z: -12 }, { x: 28, z: -12 },
-			{ x: -28, z: 12 }, { x: 28, z: 12 }, { x: -12, z: 28 }, { x: 12, z: 28 },
-			{ x: -50, z: -50 }, { x: 50, z: -50 }, { x: -50, z: 50 }, { x: 50, z: 50 },
-			{ x: -55, z: 0 }, { x: 55, z: 0 }, { x: 0, z: -55 }, { x: 0, z: 55 },
+			{ x: -20, z: -40 }, { x: 20, z: -40 }, { x: -40, z: -20 }, { x: 40, z: -20 },
+			{ x: -40, z: 20 }, { x: 40, z: 20 }, { x: -20, z: 40 }, { x: 20, z: 40 },
+			{ x: -80, z: -80 }, { x: 80, z: -80 }, { x: -80, z: 80 }, { x: 80, z: 80 },
+			{ x: -90, z: 0 }, { x: 90, z: 0 }, { x: 0, z: -90 }, { x: 0, z: 90 },
 			
 			// Strategic lighting for parkour routes
-			{ x: -21, z: -21 }, { x: 21, z: -21 }, { x: -21, z: 21 }, { x: 21, z: 21 },
-			{ x: -9, z: 24 }, { x: 9, z: 24 }, { x: -24, z: -9 }, { x: 24, z: -9 },
-			{ x: -24, z: 9 }, { x: 24, z: 9 }
+			{ x: -35, z: -35 }, { x: 35, z: -35 }, { x: -35, z: 35 }, { x: 35, z: 35 },
+			{ x: -15, z: 45 }, { x: 15, z: 45 }, { x: -45, z: -15 }, { x: 45, z: -15 },
+			{ x: -45, z: 15 }, { x: 45, z: 15 },
+			
+			// Additional lights for outer areas
+			{ x: -70, z: -30 }, { x: 70, z: -30 }, { x: -70, z: 30 }, { x: 70, z: 30 },
+			{ x: -30, z: -70 }, { x: 30, z: -70 }, { x: -30, z: 70 }, { x: 30, z: 70 }
 		];
 
 		lightPositions.forEach(pos => {
@@ -772,7 +1266,7 @@ export class GameEngine {
 
 	private addDecorations(): void {
 		// Add more trash cans throughout the larger map
-		for (let i = 0; i < 12; i++) {
+		for (let i = 0; i < 20; i++) {
 			const canGeometry = new THREE.CylinderGeometry(0.3, 0.3, 0.8);
 			const canMaterial = new THREE.MeshLambertMaterial({ color: 0x333333 });
 			const can = new THREE.Mesh(canGeometry, canMaterial);
@@ -786,7 +1280,7 @@ export class GameEngine {
 		}
 
 		// Add more benches
-		for (let i = 0; i < 8; i++) {
+		for (let i = 0; i < 15; i++) {
 			this.createBench(
 				Math.random() * this.mapSize - this.mapSize/2,
 				Math.random() * this.mapSize - this.mapSize/2
@@ -794,7 +1288,7 @@ export class GameEngine {
 		}
 
 		// Add some newspaper stands
-		for (let i = 0; i < 6; i++) {
+		for (let i = 0; i < 10; i++) {
 			this.createNewspaperStand(
 				Math.random() * this.mapSize - this.mapSize/2,
 				Math.random() * this.mapSize - this.mapSize/2
@@ -802,7 +1296,7 @@ export class GameEngine {
 		}
 
 		// Add some fire hydrants
-		for (let i = 0; i < 10; i++) {
+		for (let i = 0; i < 18; i++) {
 			this.createFireHydrant(
 				Math.random() * this.mapSize - this.mapSize/2,
 				Math.random() * this.mapSize - this.mapSize/2
@@ -863,26 +1357,50 @@ export class GameEngine {
 	}
 
 	private initLighting(): void {
-		// Dark ambient lighting for spooky atmosphere
-		const ambientLight = new THREE.AmbientLight(0x404040, 0.3);
+		// Enhanced ambient lighting for better building visibility
+		const ambientLight = new THREE.AmbientLight(0x404040, 0.5);
 		this.scene.add(ambientLight);
 
-		// Main directional light (moonlight)
-		const directionalLight = new THREE.DirectionalLight(0xffffff, 0.4);
-		directionalLight.position.set(10, 10, 5);
+		// Main directional light (moonlight) - optimized for performance
+		const directionalLight = new THREE.DirectionalLight(0x87ceeb, 0.7);
+		directionalLight.position.set(50, 100, 50);
 		directionalLight.castShadow = true;
-		directionalLight.shadow.mapSize.width = 512; // Low quality
-		directionalLight.shadow.mapSize.height = 512;
+		directionalLight.shadow.mapSize.width = 1024; // Reduced for performance
+		directionalLight.shadow.mapSize.height = 1024;
+		directionalLight.shadow.camera.near = 0.5;
+		directionalLight.shadow.camera.far = 500;
+		directionalLight.shadow.camera.left = -100;
+		directionalLight.shadow.camera.right = 100;
+		directionalLight.shadow.camera.top = 100;
+		directionalLight.shadow.camera.bottom = -100;
+		directionalLight.shadow.bias = -0.0001; // Reduce shadow acne
 		this.scene.add(directionalLight);
 
-		// Add some spooky colored lights
-		const redLight = new THREE.PointLight(0xff0000, 0.3, 10);
-		redLight.position.set(-5, 2, -5);
-		this.scene.add(redLight);
+		// Add secondary fill light for better building illumination
+		const fillLight = new THREE.DirectionalLight(0x444444, 0.2);
+		fillLight.position.set(-30, 80, -30);
+		this.scene.add(fillLight);
 
-		const blueLight = new THREE.PointLight(0x0000ff, 0.3, 10);
-		blueLight.position.set(5, 2, 5);
-		this.scene.add(blueLight);
+		// Add street lights
+		this.addStreetLights();
+	}
+	
+	private addBuildingAccentLights(): void {
+		// Add subtle accent lights to highlight building features
+		this.buildings.forEach(building => {
+			const buildingPos = building.mesh.position;
+			const height = building.height;
+			
+			// Add rooftop accent light
+			const rooftopLight = new THREE.PointLight(0xffffff, 0.3, 15);
+			rooftopLight.position.set(buildingPos.x, height + 2, buildingPos.z);
+			this.scene.add(rooftopLight);
+			
+			// Add ground-level accent light
+			const groundLight = new THREE.PointLight(0xffffaa, 0.2, 8);
+			groundLight.position.set(buildingPos.x, 1, buildingPos.z + 15);
+			this.scene.add(groundLight);
+		});
 	}
 
 	private initEventListeners(): void {
@@ -986,6 +1504,21 @@ export class GameEngine {
 			if (event.button === 0) { // Left click
 				this.keys.attack = false;
 			}
+		});
+
+		// Mouse wheel for camera zoom
+		document.addEventListener('wheel', (event) => {
+			event.preventDefault();
+			
+			// Zoom in/out based on scroll direction
+			const zoomSpeed = 2;
+			const zoomDelta = event.deltaY > 0 ? zoomSpeed : -zoomSpeed;
+			
+			// Update camera distance with bounds
+			this.cameraDistance = Math.max(
+				this.minCameraDistance,
+				Math.min(this.maxCameraDistance, this.cameraDistance + zoomDelta)
+			);
 		});
 
 		// Touch controls for mobile
@@ -1092,6 +1625,11 @@ export class GameEngine {
 			return;
 		}
 		
+		// Debug logging for movement issues
+		if (this.isOnBuilding && this.currentBuildingHeight > 0) {
+			console.log('Physics update - Player on building:', this.currentBuildingHeight, 'Position:', this.playerGroup.position.x.toFixed(2), this.playerGroup.position.y.toFixed(2), this.playerGroup.position.z.toFixed(2), 'OnGround:', this.playerOnGround, 'Velocity:', this.playerVelocity.x.toFixed(2), this.playerVelocity.y.toFixed(2), this.playerVelocity.z.toFixed(2));
+		}
+		
 		// Store previous position for interpolation
 		this.lastPosition.copy(this.playerGroup.position);
 		this.lastVelocity.copy(this.playerVelocity);
@@ -1099,6 +1637,17 @@ export class GameEngine {
 		// Handle input-based movement
 		const moveX = (this.keys.right ? 1 : 0) - (this.keys.left ? 1 : 0);
 		const moveZ = (this.keys.up ? 1 : 0) - (this.keys.down ? 1 : 0);
+		
+		// Debug input logging
+		if (this.isOnBuilding && this.currentBuildingHeight > 0 && (moveX !== 0 || moveZ !== 0)) {
+			console.log('Input detected - moveX:', moveX, 'moveZ:', moveZ, 'keys:', this.keys);
+		}
+		
+		// Force input processing even when on buildings
+		if (this.isOnBuilding && this.currentBuildingHeight > 0) {
+			// Ensure movement works on buildings by forcing ground state
+			this.playerOnGround = true;
+		}
 		
 		// Normalize diagonal movement
 		const moveMagnitude = Math.sqrt(moveX * moveX + moveZ * moveZ);
@@ -1112,17 +1661,26 @@ export class GameEngine {
 		const cameraRight = new THREE.Vector3(1, 0, 0);
 		cameraRight.applyAxisAngle(new THREE.Vector3(0, 1, 0), this.cameraRotationY);
 
-		// Calculate movement speed
-		const baseSpeed = this.playerOnGround ? 8 : 4; // Reduced air control
+		// Calculate movement speed - same for ground and buildings
+		const baseSpeed = 8;
 		const currentSpeed = baseSpeed * (this.isMoving ? 1.5 : 1); // Running speed
 
 		// Calculate target velocity in camera-relative space
 		const targetVelocityX = (cameraRight.x * normalizedMoveX + cameraDirection.x * normalizedMoveZ) * currentSpeed;
 		const targetVelocityZ = (cameraRight.z * normalizedMoveX + cameraDirection.z * normalizedMoveZ) * currentSpeed;
 
-		// Apply movement forces
+		// Apply movement forces - simplified for both ground and buildings
+		// Force playerOnGround to true when on a building to ensure movement works
+		if (this.isOnBuilding && this.currentBuildingHeight > 0) {
+			this.playerOnGround = true;
+			// Ensure player stays at building height when not jumping
+			if (this.playerVelocity.y <= 0 && this.playerGroup.position.y < this.currentBuildingHeight + 0.5) {
+				this.playerGroup.position.y = this.currentBuildingHeight + 1.5;
+				this.playerVelocity.y = 0;
+			}
+		}
+		
 		if (this.playerOnGround) {
-			// Ground movement with friction
 			// Smooth velocity interpolation
 			this.playerVelocity.x += (targetVelocityX - this.playerVelocity.x) * 8 * delta;
 			this.playerVelocity.z += (targetVelocityZ - this.playerVelocity.z) * 8 * delta;
@@ -1142,27 +1700,21 @@ export class GameEngine {
 		// Update movement state for animation
 		this.isMoving = moveMagnitude > 0;
 
-		// Handle jumping with improved physics
+		// Handle jumping - simplified
 		if (this.keys.jump) {
 			this.jumpBufferCounter = this.jumpBufferTime;
 		}
 
 		// Apply jump if conditions are met
 		if (this.jumpBufferCounter > 0 && (this.playerOnGround || this.coyoteTimeCounter > 0)) {
-			this.playerVelocity.y = 12; // Increased jump force
+			this.playerVelocity.y = 12;
 			this.playerOnGround = false;
 			this.jumpBufferCounter = 0;
 			this.coyoteTimeCounter = 0;
-			
-			// If jumping from a building, clear building state to prevent collision loops
-			if (this.isOnBuilding) {
-				this.isOnBuilding = false;
-				this.currentBuildingHeight = 0;
-			}
 		}
 
-		// Apply gravity with terminal velocity
-		const gravity = 25; // Increased gravity
+		// Apply gravity
+		const gravity = 25;
 		const terminalVelocity = 20;
 		this.playerVelocity.y -= gravity * delta;
 		this.playerVelocity.y = Math.max(this.playerVelocity.y, -terminalVelocity);
@@ -1177,7 +1729,7 @@ export class GameEngine {
 		// Update jump buffer
 		this.jumpBufferCounter -= delta;
 
-		// Apply velocity to position
+		// Apply velocity to position - always apply full velocity
 		this.playerGroup.position.add(this.playerVelocity.clone().multiplyScalar(delta));
 
 		// Update character rotation based on movement
@@ -1197,6 +1749,11 @@ export class GameEngine {
 
 		// Prevent getting stuck
 		this.preventStuckPosition();
+		
+		// Update attack cooldown
+		if (this.attackCooldown > 0) {
+			this.attackCooldown -= delta;
+		}
 	}
 
 	private preventStuckPosition(): void {
@@ -1259,6 +1816,11 @@ export class GameEngine {
 			return;
 		}
 		
+		// Simple post-climbing handling
+		if (this.postClimbingGracePeriod > 0) {
+			this.postClimbingGracePeriod -= delta;
+		}
+		
 		// Update building exit timer
 		if (this.buildingExitTimer > 0) {
 			this.buildingExitTimer -= delta;
@@ -1272,40 +1834,38 @@ export class GameEngine {
 			const playerHeight = this.playerGroup.position.y;
 			const buildingTop = building.height;
 			
-			// IMPROVED BUILDING DETECTION - More generous and reliable
-			const buildingRadius = 4.0; // Increased from 3.0 for better detection
-			const landingHeight = buildingTop + 1.5; // Higher landing point for stability
+			// Building detection using correct radius for the building size
+			const buildingRadius = 3; // Top width is 6, so radius is 3 (this is correct for rooftop)
+			const landingHeight = buildingTop + 1.5;
 			const isNearBuilding = distance < buildingRadius;
 			const isAboveBuilding = playerHeight > buildingTop - 1 && playerHeight < buildingTop + 5;
 			const isOnBuilding = isNearBuilding && isAboveBuilding && this.playerVelocity.y <= 0;
 			
-			// CASE 1: Player is already on this building - maintain position
-			if (this.isOnBuilding && this.currentBuildingHeight === buildingTop && distance < buildingRadius + 1) {
-				// Keep player on building unless they're actively jumping off
-				if (this.playerVelocity.y <= 0) {
-					this.playerGroup.position.y = landingHeight;
-					this.playerVelocity.y = 0;
-					this.playerOnGround = true;
-					landedOnBuilding = true;
-					
-					// Show building indicator
-					if (!this.buildingIndicator) {
-						this.addBuildingIndicator();
-					}
-					
-					// Debug logging
-					if (Math.random() < 0.01) { // Log occasionally
-						console.log(`Maintaining position on building at height ${buildingTop}, player height: ${playerHeight.toFixed(2)}`);
-					}
-				} else {
-					// Player is jumping off - allow them to leave
-					this.isOnBuilding = false;
-					this.currentBuildingHeight = 0;
-					this.buildingExitTimer = 0.5;
-					this.removeBuildingIndicator();
+					// CASE 1: Player is already on this building - simple height maintenance
+		if (this.isOnBuilding && this.currentBuildingHeight === buildingTop && distance < buildingRadius + 2) {
+			// Only maintain height if player is actually falling and below the building surface
+			if (this.playerVelocity.y <= 0 && playerHeight < buildingTop + 0.5) {
+				this.playerGroup.position.y = landingHeight;
+				this.playerVelocity.y = 0;
+				this.playerOnGround = true;
+				landedOnBuilding = true;
+				
+				// Show building indicator
+				if (!this.buildingIndicator) {
+					this.addBuildingIndicator();
 				}
-				return; // Skip other checks for this building
+			} else {
+				// Player is jumping or moving - allow free movement and don't interfere
+				this.playerOnGround = this.playerVelocity.y <= 0;
+				landedOnBuilding = true;
+				
+				// Show building indicator
+				if (!this.buildingIndicator) {
+					this.addBuildingIndicator();
+				}
 			}
+			return; // Skip other checks for this building
+		}
 			
 			// CASE 2: Player is landing on a building (not currently on one)
 			if (!this.isOnBuilding && isOnBuilding && this.buildingExitTimer <= 0) {
@@ -1323,39 +1883,50 @@ export class GameEngine {
 				// Add landing effect
 				this.addLandingEffect(this.playerGroup.position.clone());
 				
-				console.log(`Landed on building at height ${buildingTop}! Player height: ${playerHeight.toFixed(2)}, Distance: ${distance.toFixed(2)}`);
+				console.log(`Landed on building at height ${buildingTop}!`);
 			}
 			
-			// CASE 3: Player is colliding with building side - push away gently
-			else if (isNearBuilding && !isOnBuilding && distance < 2.0) { // Reduced from 2.5
-				const direction = this.playerGroup.position.clone().sub(buildingPos).normalize();
-				// Gentler push - only move player slightly away
-				const pushDistance = 2.5; // Reduced from 3.0
-				this.playerGroup.position.copy(buildingPos.clone().add(direction.multiplyScalar(pushDistance)));
-				
-				// Gentler velocity adjustment
-				const velocity2D = new THREE.Vector3(this.playerVelocity.x, 0, this.playerVelocity.z);
-				const velocityDot = velocity2D.dot(direction);
-				if (velocityDot < 0) {
-					// Only reduce velocity, don't completely stop it
-					this.playerVelocity.x -= direction.x * velocityDot * 0.5;
-					this.playerVelocity.z -= direction.z * velocityDot * 0.5;
-				}
-			}
-			
-			// CASE 4: Check for climbing only if not on any building
+			// CASE 3: Check for climbing only if not on any building
 			if (!landedOnBuilding && !this.isOnBuilding && !this.isClimbingLadder) {
 				this.checkClimbing(building, buildingPos, buildingTop, delta);
 			}
 		});
 
-		// Check for building-to-building jumping only if not on a building
-		if (!landedOnBuilding && !this.isOnBuilding) {
-			this.checkBuildingToBuildingJumping();
+		// Check for building-to-building jumping (always check, even when on a building)
+		this.checkBuildingToBuildingJumping();
+		
+		// Check if player has left the building they were on
+		if (this.isOnBuilding && !landedOnBuilding) {
+			const currentBuilding = this.buildings.find(building => 
+				building.height === this.currentBuildingHeight
+			);
+			
+			if (currentBuilding) {
+				const distance = this.playerGroup.position.distanceTo(currentBuilding.mesh.position);
+				const playerHeight = this.playerGroup.position.y;
+				const buildingTop = currentBuilding.height;
+				
+				// More lenient exit detection - only exit if player is clearly off the building
+				const hasLeftBuilding = distance > 4 || // Use building radius + 1 for exit detection
+					playerHeight < buildingTop - 5 || // Increased from 3 to 5
+					playerHeight > buildingTop + 15; // Increased from 10 to 15
+				
+				// Skip exit detection during and immediately after climbing
+				if (hasLeftBuilding && this.buildingExitTimer <= 0 && this.postClimbingGracePeriod <= 0) {
+					// Player has left the building
+					this.isOnBuilding = false;
+					this.currentBuildingHeight = 0;
+					this.removeBuildingIndicator();
+					this.buildingExitTimer = 0.5;
+					
+					console.log('Player left building');
+				}
+			}
 		}
 		
 		// Reset building state if player falls below ground level
-		if (!landedOnBuilding && this.playerGroup.position.y < 0.5) {
+		// BUT skip this check during and immediately after climbing
+		if (!landedOnBuilding && this.playerGroup.position.y < 0.5 && this.postClimbingGracePeriod <= 0) {
 			this.isOnBuilding = false;
 			this.currentBuildingHeight = 0;
 			this.removeBuildingIndicator();
@@ -1370,7 +1941,7 @@ export class GameEngine {
 		const playerHeight = this.playerGroup.position.y;
 		
 		// Check if player is near the ladder (increased range for better usability)
-		const ladderDetectionRange = 8.0; // Increased range for better accessibility
+		const ladderDetectionRange = 12.0; // Increased range for better accessibility with side-mounted ladders
 		const nearLadder = distanceToLadder < ladderDetectionRange;
 		
 		// Update ladder interaction state
@@ -1408,8 +1979,8 @@ export class GameEngine {
 	}
 
 	private checkBuildingToBuildingJumping(): void {
-		// Only check when player is in air and moving
-		if (this.playerOnGround || (this.playerVelocity.x === 0 && this.playerVelocity.z === 0)) return;
+		// Check when player is in air and moving, OR when on a building and jumping
+		if ((this.playerOnGround && !this.isOnBuilding) || (this.playerVelocity.x === 0 && this.playerVelocity.z === 0)) return;
 		
 		this.buildings.forEach(building => {
 			const buildingPos = building.mesh.position;
@@ -1417,14 +1988,15 @@ export class GameEngine {
 			const playerHeight = this.playerGroup.position.y;
 			const buildingTop = building.height;
 			
-			// IMPROVED BUILDING-TO-BUILDING JUMPING - More generous detection
-			const jumpDetectionRange = 8.0; // Increased from 6.0
-			const heightRange = 3.0; // Increased from 2.0
+			// IMPROVED BUILDING-TO-BUILDING JUMPING - Adjusted for new spacing
+			const jumpDetectionRange = 10.0; // Increased for better building-to-building jumping
+			const heightRange = 4.0; // Increased for more forgiving height detection
 			
-			// Check if player is jumping toward a building
+			// Check if player is jumping toward a building (more generous when jumping from buildings)
+			const heightRangeForJump = this.isOnBuilding ? heightRange + 2 : heightRange;
 			if (distance < jumpDetectionRange && 
-				playerHeight > buildingTop - heightRange && 
-				playerHeight < buildingTop + heightRange + 2) {
+				playerHeight > buildingTop - heightRangeForJump && 
+				playerHeight < buildingTop + heightRangeForJump + 2) {
 				
 				const playerToBuilding = buildingPos.clone().sub(this.playerGroup.position).normalize();
 				const jumpDirection = new THREE.Vector3(this.playerVelocity.x, 0, this.playerVelocity.z).normalize();
@@ -1498,14 +2070,46 @@ export class GameEngine {
 
 	private updateCamera(): void {
 		// Calculate camera position based on player position and mouse rotation
+		const playerPos = this.playerGroup.position;
+		
+		// Dynamic camera height based on player height
+		const playerHeight = playerPos.y;
+		const dynamicCameraHeight = Math.max(this.cameraHeight, playerHeight + 8);
+		
 		const cameraOffset = new THREE.Vector3(
 			Math.sin(this.cameraRotationY) * this.cameraDistance,
-			this.cameraHeight,
+			dynamicCameraHeight,
 			Math.cos(this.cameraRotationY) * this.cameraDistance
 		);
 		
-		this.camera.position.copy(this.playerGroup.position).add(cameraOffset);
-		this.camera.lookAt(this.playerGroup.position);
+		this.camera.position.copy(playerPos).add(cameraOffset);
+		
+		// Look at player with better height offset
+		const lookAtY = playerHeight + 1.5; // Look at player's head level
+		this.camera.lookAt(playerPos.x, lookAtY, playerPos.z);
+		
+		// Prevent camera from going through buildings
+		this.preventCameraCollision();
+	}
+	
+	private preventCameraCollision(): void {
+		// Simple collision detection to prevent camera going through buildings
+		const playerPos = this.playerGroup.position;
+		const cameraPos = this.camera.position;
+		
+		// Check if camera is too close to any building
+		for (const building of this.buildings) {
+			const buildingPos = building.mesh.position;
+			const distance = cameraPos.distanceTo(buildingPos);
+			const buildingRadius = 15; // Approximate building radius
+			
+			if (distance < buildingRadius + 2) {
+				// Push camera away from building
+				const direction = cameraPos.clone().sub(buildingPos).normalize();
+				const pushDistance = buildingRadius + 2 - distance;
+				this.camera.position.add(direction.multiplyScalar(pushDistance));
+			}
+		}
 	}
 
 	private updateWeaponAnimation(delta: number): void {
@@ -1664,9 +2268,17 @@ export class GameEngine {
 			
 			// Check for player damage
 			if (zombie.mesh.position.distanceTo(this.playerGroup.position) < 1.5) {
-				this.playerHealth -= 10 * delta;
-				if (this.playerHealth <= 0) {
-					this.gameState.gameOver = true;
+				const currentTime = Date.now() / 1000;
+				if (currentTime - this.lastDamageTime >= this.damageCooldown) {
+					this.playerHealth -= 10 * delta;
+					this.lastDamageTime = currentTime;
+					
+					// Trigger damage animation
+					this.triggerDamageAnimation();
+					
+					if (this.playerHealth <= 0) {
+						this.gameState.gameOver = true;
+					}
 				}
 			}
 			
@@ -1712,9 +2324,141 @@ export class GameEngine {
 			zombie.speed *= 2;
 		}, 1000);
 	}
+	
+	private triggerDamageAnimation(): void {
+		if (!this.isTakingDamage) {
+			this.isTakingDamage = true;
+			this.damageAnimationTimer = this.damageAnimationDuration;
+			
+			// Create damage effect particles
+			this.createDamageEffect();
+			
+			// Play damage sound
+			this.playDamageSound();
+		}
+	}
+	
+	private createDamageEffect(): void {
+		// Create red damage particles around the player
+		const particleCount = 8;
+		const radius = 2;
+		
+		for (let i = 0; i < particleCount; i++) {
+			const angle = (i / particleCount) * Math.PI * 2;
+			const x = Math.cos(angle) * radius;
+			const z = Math.sin(angle) * radius;
+			
+			// Create damage particle
+			const particleGeometry = new THREE.SphereGeometry(0.15, 4, 4);
+			const particleMaterial = new THREE.MeshLambertMaterial({ 
+				color: 0xff0000,
+				emissive: 0x440000,
+				transparent: true,
+				opacity: 0.9
+			});
+			const particle = new THREE.Mesh(particleGeometry, particleMaterial);
+			
+			particle.position.copy(this.playerGroup.position);
+			particle.position.x += x;
+			particle.position.z += z;
+			particle.position.y = 1.5;
+			
+			this.scene.add(particle);
+			
+			// Animate particle
+			const startTime = Date.now();
+			const animateParticle = () => {
+				const elapsed = (Date.now() - startTime) / 1000;
+				const progress = elapsed / 0.4; // 0.4 second animation
+				
+				if (progress < 1) {
+					// Expand outward and upward
+					const currentRadius = radius * (1 + progress * 0.5);
+					particle.position.x = this.playerGroup.position.x + Math.cos(angle) * currentRadius;
+					particle.position.z = this.playerGroup.position.z + Math.sin(angle) * currentRadius;
+					particle.position.y = 1.5 + progress * 2; // Move upward
+					
+					// Fade out
+					particle.material.opacity = 0.9 * (1 - progress);
+					particle.scale.setScalar(1 + progress * 0.3);
+					
+					requestAnimationFrame(animateParticle);
+				} else {
+					this.scene.remove(particle);
+				}
+			};
+			animateParticle();
+		}
+	}
+	
+	private playDamageSound(): void {
+		// Create a simple damage sound effect
+		if (!this.audioContext) {
+			this.audioContext = new (window.AudioContext || (window as any).webkitAudioContext)();
+		}
+		
+		try {
+			const oscillator = this.audioContext.createOscillator();
+			const gainNode = this.audioContext.createGain();
+			
+			oscillator.connect(gainNode);
+			gainNode.connect(this.audioContext.destination);
+			
+			oscillator.frequency.setValueAtTime(200, this.audioContext.currentTime);
+			oscillator.frequency.exponentialRampToValueAtTime(100, this.audioContext.currentTime + 0.1);
+			
+			gainNode.gain.setValueAtTime(0.3, this.audioContext.currentTime);
+			gainNode.gain.exponentialRampToValueAtTime(0.01, this.audioContext.currentTime + 0.1);
+			
+			oscillator.start(this.audioContext.currentTime);
+			oscillator.stop(this.audioContext.currentTime + 0.1);
+		} catch (error) {
+			console.log('Audio not supported or blocked');
+		}
+	}
+	
+	private updateDamageVisualEffect(): void {
+		// Make the player flash red during damage animation
+		if (this.playerGroup) {
+			const progress = this.damageAnimationTimer / this.damageAnimationDuration;
+			const flashIntensity = Math.sin(progress * Math.PI * 8) * 0.5 + 0.5; // Rapid flashing
+			
+			// Apply red tint to player materials
+			this.playerGroup.children.forEach((child: any) => {
+				if (child.material && child.material.color) {
+					// Store original color if not already stored
+					if (!child.material.userData.originalColor) {
+						child.material.userData.originalColor = child.material.color.clone();
+					}
+					
+					// Apply red tint based on flash intensity
+					const originalColor = child.material.userData.originalColor;
+					child.material.color.setRGB(
+						originalColor.r + flashIntensity * 0.5,
+						originalColor.g * (1 - flashIntensity * 0.3),
+						originalColor.b * (1 - flashIntensity * 0.3)
+					);
+				}
+			});
+		}
+	}
+	
+	private resetPlayerVisualEffect(): void {
+		// Reset player materials to original colors
+		if (this.playerGroup) {
+			this.playerGroup.children.forEach((child: any) => {
+				if (child.material && child.material.color && child.material.userData.originalColor) {
+					child.material.color.copy(child.material.userData.originalColor);
+				}
+			});
+		}
+	}
 
 	private attack(): void {
-		if (this.isAttacking || this.attackCooldown > 0) return;
+		if (this.isAttacking || this.attackCooldown > 0) {
+			console.log('Attack blocked: isAttacking=', this.isAttacking, 'attackCooldown=', this.attackCooldown);
+			return;
+		}
 		
 		this.isAttacking = true;
 		this.attackCooldown = 0.5;
@@ -1899,7 +2643,7 @@ export class GameEngine {
 		this.isClimbingLadder = true;
 		this.ladderClimbProgress = 0;
 		this.ladderStartHeight = this.playerGroup.position.y;
-		this.ladderClimbTarget = buildingTop + 2; // Climb higher above the roof
+		this.ladderClimbTarget = buildingTop + 1.5; // Climb to rooftop level (not above it)
 		this.ladderClimbStartTime = this.clock.getElapsedTime(); // Track start time
 		
 		// IMMEDIATELY disable all physics and collision systems
@@ -1909,9 +2653,13 @@ export class GameEngine {
 		this.currentBuildingHeight = 0;
 		
 		// IMMEDIATELY position player at the ladder (outside the building)
+		// Ensure we're positioned correctly relative to the ladder
 		this.playerGroup.position.x = ladderPos.x;
 		this.playerGroup.position.z = ladderPos.z;
-		// Don't change Y position yet - let continueClimbing handle that
+		// Start climbing from current height or slightly above ground if too low
+		if (this.playerGroup.position.y < 1) {
+			this.playerGroup.position.y = 1;
+		}
 		
 		// Add climbing start effect
 		this.addClimbingEffect(this.playerGroup.position.clone());
@@ -1922,6 +2670,13 @@ export class GameEngine {
 	}
 
 	private continueClimbing(delta: number, ladderPos: THREE.Vector3): void {
+		// Safety check - ensure we're actually climbing
+		if (!this.isClimbingLadder || this.ladderClimbTarget <= 0) {
+			console.warn('Invalid climbing state detected - stopping climb');
+			this.stopClimbing();
+			return;
+		}
+		
 		// Check for climbing timeout - emergency unstuck
 		const currentTime = this.clock.getElapsedTime();
 		const timeClimbing = currentTime - this.ladderClimbStartTime;
@@ -1970,34 +2725,778 @@ export class GameEngine {
 	private finishClimbing(): void {
 		console.log('=== FINISHING CLIMB ===');
 		console.log('Player position before finish:', this.playerGroup.position);
-		
+
+		// COMPLETELY reset climbing state
 		this.isClimbingLadder = false;
 		this.ladderClimbProgress = 0;
+		this.ladderClimbTarget = 0; // Clear the target
+		this.currentLadder = null; // Clear ladder reference
+		this.nearLadder = false; // Clear ladder proximity
+
+		// Find the building that was being climbed
+		let targetBuilding: Building | null = null;
+		let minDist = Infinity;
 		
-		// Ensure player is at the target height (above the roof)
-		this.playerGroup.position.y = this.ladderClimbTarget;
+		console.log('=== BUILDING DETECTION DEBUG ===');
+		console.log('Player position during finish:', this.playerGroup.position.x.toFixed(2), this.playerGroup.position.y.toFixed(2), this.playerGroup.position.z.toFixed(2));
+		console.log('Total buildings:', this.buildings.length);
 		
-		// Move player slightly away from ladder to avoid getting stuck
-		// Since ladder is at x + 3.5, move player further away from building
-		const ladderDirection = new THREE.Vector3(1, 0, 0); // Away from building
-		this.playerGroup.position.add(ladderDirection.multiplyScalar(2.0)); // Move further away
+		// First, try to find the building by checking which one has a ladder near the player's position
+		for (const building of this.buildings) {
+			if (building.ladder) {
+				const ladderDist = this.playerGroup.position.distanceTo(building.ladder.position);
+				console.log('Building with ladder - distance to ladder:', ladderDist.toFixed(2), 'building height:', building.height);
+				if (ladderDist < minDist) {
+					minDist = ladderDist;
+					targetBuilding = building;
+				}
+			}
+		}
 		
-		// Re-enable physics
+		console.log('Best ladder distance found:', minDist.toFixed(2));
+		
+		// If no building found by ladder proximity, find by general proximity
+		if (!targetBuilding) {
+			console.log('No building found by ladder proximity, trying general proximity...');
+			minDist = Infinity;
+			for (const building of this.buildings) {
+				const dist = this.playerGroup.position.distanceTo(building.mesh.position);
+				console.log('Building distance:', dist.toFixed(2), 'building height:', building.height);
+				if (dist < minDist) {
+					minDist = dist;
+					targetBuilding = building;
+				}
+			}
+		}
+		
+		console.log('Target building found:', targetBuilding ? 'YES' : 'NO');
+		if (targetBuilding) {
+			console.log('Target building height:', targetBuilding.height);
+			console.log('Distance to target building:', minDist.toFixed(2));
+		}
+		
+		// Fallback: If no building found but we have a ladder target height, find building by height
+		if (!targetBuilding && this.ladderClimbTarget > 0) {
+			console.log('Using ladder target height fallback:', this.ladderClimbTarget);
+			for (const building of this.buildings) {
+				if (Math.abs(building.height - this.ladderClimbTarget) < 1) {
+					targetBuilding = building;
+					minDist = this.playerGroup.position.distanceTo(building.mesh.position);
+					console.log('Found building by target height:', building.height);
+					break;
+				}
+			}
+		}
+		
+		// Place player on the target building
+		if (targetBuilding && minDist < 25) { // Increased from 15 to 25 for more generous detection
+			this.isOnBuilding = true;
+			this.currentBuildingHeight = targetBuilding.height;
+			
+			// Calculate direction from ladder to building center for proper positioning
+			let directionToCenter: THREE.Vector3;
+			if (targetBuilding.ladder) {
+				// Use the ladder position to determine direction to building center
+				directionToCenter = targetBuilding.mesh.position.clone().sub(targetBuilding.ladder.position).normalize();
+				console.log('Using ladder position for direction calculation');
+				console.log('Ladder position:', targetBuilding.ladder.position.x.toFixed(2), targetBuilding.ladder.position.y.toFixed(2), targetBuilding.ladder.position.z.toFixed(2));
+				console.log('Building position:', targetBuilding.mesh.position.x.toFixed(2), targetBuilding.mesh.position.y.toFixed(2), targetBuilding.mesh.position.z.toFixed(2));
+			} else {
+				// Fallback: use current position to building center
+				directionToCenter = targetBuilding.mesh.position.clone().sub(this.playerGroup.position).normalize();
+				console.log('Using fallback direction calculation');
+			}
+			
+			console.log('Direction to center:', directionToCenter.x.toFixed(2), directionToCenter.y.toFixed(2), directionToCenter.z.toFixed(2));
+			
+			// Place player in a much better position on the rooftop - further from center for more movement space
+			const buildingRadius = 3; // Top width is 6, so radius is 3
+			const safeDistance = buildingRadius * 0.6; // 60% of radius - much better distance from center
+			
+			// Use a random offset to avoid always placing in the same spot
+			const randomAngle = Math.random() * Math.PI * 2;
+			const randomOffset = new THREE.Vector3(
+				Math.cos(randomAngle) * safeDistance,
+				0,
+				Math.sin(randomAngle) * safeDistance
+			);
+			
+			// Place player at a good distance from building center
+			this.playerGroup.position.copy(targetBuilding.mesh.position.clone().add(randomOffset));
+			this.playerGroup.position.y = targetBuilding.height + 1.5;
+			
+			// Check if player is too close to any rooftop structures and adjust if needed
+			const rooftopStructures = [
+				{ x: -30, z: -30 }, // antenna
+				{ x: 30, z: -30 },  // water_tank
+				{ x: -30, z: 30 },  // antenna
+				{ x: 30, z: 30 }    // helicopter_pad
+			];
+			
+			for (const structure of rooftopStructures) {
+				const structurePos = new THREE.Vector3(
+					targetBuilding.mesh.position.x + structure.x,
+					targetBuilding.height + 1.5,
+					targetBuilding.mesh.position.z + structure.z
+				);
+				const distanceToStructure = this.playerGroup.position.distanceTo(structurePos);
+				
+				if (distanceToStructure < 2) {
+					console.log('Player too close to rooftop structure, adjusting position...');
+					// Move player away from structure
+					const awayDirection = this.playerGroup.position.clone().sub(structurePos).normalize();
+					this.playerGroup.position.copy(structurePos.clone().add(awayDirection.multiplyScalar(3)));
+					this.playerGroup.position.y = targetBuilding.height + 1.5;
+					break;
+				}
+			}
+			
+			// Reset all movement state to ensure player can move freely
+			this.playerVelocity.set(0, 0, 0);
+			this.playerOnGround = true;
+			this.isMoving = false;
+			
+			// Ensure building state is properly set
+			this.isOnBuilding = true;
+			this.currentBuildingHeight = targetBuilding.height;
+			
+			this.addBuildingIndicator();
+			console.log('Placed player on building at height', targetBuilding.height);
+			console.log('Final player position:', this.playerGroup.position.x.toFixed(2), this.playerGroup.position.y.toFixed(2), this.playerGroup.position.z.toFixed(2));
+			console.log('Player movement state reset - should be able to move freely');
+		} else {
+			this.isOnBuilding = false;
+			this.currentBuildingHeight = 0;
+			this.playerGroup.position.y = 1;
+			console.log('No building found - set to ground');
+		}
+		
 		this.playerOnGround = true;
 		this.playerVelocity.set(0, 0, 0);
-		this.isOnBuilding = true;
-		this.currentBuildingHeight = this.ladderClimbTarget - 2; // Set building height
+
+		// Set grace period after climbing to prevent false stuck detection
+		this.postClimbingGracePeriod = 5.0; // 5 seconds grace period - longer for stability
+		this.stuckTimer = 0; // Reset stuck timer
 		
+		// Add a longer delay before enabling building collision detection to ensure player is stable
+		this.buildingExitTimer = 2.0; // 2 second delay before building detection works - longer for stability
+		
+		// Force update the building state to ensure it's properly set
+		if (this.isOnBuilding && this.currentBuildingHeight > 0) {
+			console.log('Forcing building state update after climbing');
+			// Ensure the building indicator is shown
+			this.addBuildingIndicator();
+		}
+
 		// Add climbing completion effect
 		this.addClimbingEffect(this.playerGroup.position.clone());
-		
+
 		// Hide ladder indicator after climbing
 		this.hideLadderIndicator();
 		this.nearLadder = false;
 		this.currentLadder = null;
-		
+
 		console.log('Player position after finish:', this.playerGroup.position);
+		console.log('Building height set to:', this.currentBuildingHeight);
+		console.log('Player on ground:', this.playerOnGround);
+		console.log('Player velocity:', this.playerVelocity.x.toFixed(2), this.playerVelocity.y.toFixed(2), this.playerVelocity.z.toFixed(2));
 		console.log('=== CLIMB FINISHED ===');
+		
+		// Final validation - only correct height, don't move player position
+		if (this.isOnBuilding && this.currentBuildingHeight > 0 && targetBuilding) {
+			// Verify player is at the correct height
+			const expectedHeight = this.currentBuildingHeight + 1.5;
+			const heightDifference = Math.abs(this.playerGroup.position.y - expectedHeight);
+			
+			if (heightDifference > 1) {
+				console.log('Correcting final player height...');
+				this.playerGroup.position.y = expectedHeight;
+			}
+			
+			// Log final position for debugging
+			console.log('Final rooftop position:', this.playerGroup.position.x.toFixed(2), this.playerGroup.position.y.toFixed(2), this.playerGroup.position.z.toFixed(2));
+			console.log('Distance from building center:', this.playerGroup.position.distanceTo(targetBuilding.mesh.position).toFixed(2));
+		}
+	}
+
+	private checkForStuckClimbing(): void {
+		// Check if player is stuck in a building
+		if (this.isClimbingLadder && this.currentLadder && this.playerGroup.position.y < this.currentBuildingHeight) {
+			console.warn('Player is stuck in a building - emergency unstuck');
+			this.emergencyUnstuck(this.currentLadder.position);
+		}
+	}
+
+	private manualUnstuck(): void {
+		console.log('Manual unstuck requested');
+		console.log('Current position:', this.playerGroup.position.x.toFixed(2), this.playerGroup.position.y.toFixed(2), this.playerGroup.position.z.toFixed(2));
+		console.log('Is on building:', this.isOnBuilding, 'Building height:', this.currentBuildingHeight);
+		
+		// If climbing, force finish climbing
+		if (this.isClimbingLadder && this.currentLadder) {
+			console.log('Finishing climbing via emergency unstuck');
+			this.emergencyUnstuck(this.currentLadder.position);
+			return;
+		}
+		
+		// Check if player is stuck at base of building (common issue after climbing)
+		this.buildings.forEach(building => {
+			if (building.climbable && building.ladder) {
+				const buildingPos = building.mesh.position;
+				const ladderPos = building.ladder.position;
+				const distanceToBuilding = this.playerGroup.position.distanceTo(buildingPos);
+				const distanceToLadder = this.playerGroup.position.distanceTo(ladderPos);
+				
+				// If player is near ladder but at ground level, they might be stuck
+				if (distanceToLadder < 3 && this.playerGroup.position.y < 2) {
+					console.log('Player appears stuck at base of building, moving to safe ground position');
+					// Move player away from building to a safe ground position
+					const awayDirection = this.playerGroup.position.clone().sub(buildingPos).normalize();
+					this.playerGroup.position.copy(buildingPos.clone().add(awayDirection.multiplyScalar(5)));
+					this.playerGroup.position.y = 1;
+					this.playerOnGround = true;
+					this.isOnBuilding = false;
+					this.currentBuildingHeight = 0;
+					this.playerVelocity.set(0, 0, 0);
+					console.log('Moved player to safe ground position');
+					return;
+				}
+			}
+		});
+		
+		// If on a building but position doesn't match building height, fix it
+		if (this.isOnBuilding) {
+			const expectedHeight = this.currentBuildingHeight + 1.5; // Normal landing height on building
+			const heightDifference = Math.abs(this.playerGroup.position.y - expectedHeight);
+			
+			if (heightDifference > 2) {
+				console.log('Player on building but at wrong height, correcting...');
+				this.playerGroup.position.y = expectedHeight;
+				this.playerVelocity.set(0, 0, 0);
+				console.log('Corrected building position to height:', expectedHeight);
+				return;
+			}
+			
+			// Special case: If player is on building but can't move, force enable movement
+			if (this.playerVelocity.length() < 0.1 && this.playerOnGround) {
+				console.log('Player on building but appears stuck - forcing movement enable');
+				this.playerOnGround = true;
+				this.playerVelocity.set(0, 0, 0);
+				// Don't change position, just ensure movement is enabled
+				return;
+			}
+			
+			// Special case: If player is on building but too close to edge, move them to center
+			const buildingRadius = 3; // Top width is 6, so radius is 3
+			const distanceFromCenter = this.playerGroup.position.distanceTo(new THREE.Vector3(0, this.currentBuildingHeight, 0));
+			
+			if (distanceFromCenter > buildingRadius * 0.9) {
+				console.log('Player too close to building edge - moving to safer position');
+				// Find the building center and move player there
+				const building = this.buildings.find(b => b.height === this.currentBuildingHeight);
+				if (building) {
+					const directionToCenter = building.mesh.position.clone().sub(this.playerGroup.position).normalize();
+					const targetDistance = buildingRadius * 0.6; // 60% of radius - very safe distance
+					this.playerGroup.position.copy(building.mesh.position.clone().add(directionToCenter.multiplyScalar(targetDistance)));
+					this.playerGroup.position.y = this.currentBuildingHeight + 1.5;
+					console.log('Moved player to safer rooftop position');
+					return;
+				}
+			}
+		}
+		
+		// If stuck in a building (high up but not on building), try to find the building
+		if (this.playerGroup.position.y > 10 && !this.isOnBuilding) {
+			console.log('Player high up but not on building - trying to find building...');
+			
+			// Find the closest building
+			let closestBuilding: Building | null = null;
+			let minDist = Infinity;
+			for (const building of this.buildings) {
+				const dist = this.playerGroup.position.distanceTo(building.mesh.position);
+				if (dist < minDist) {
+					minDist = dist;
+					closestBuilding = building;
+				}
+			}
+			
+			if (closestBuilding && minDist < 10) {
+				// Found a building - snap to it
+				this.isOnBuilding = true;
+				this.currentBuildingHeight = closestBuilding.height;
+				this.playerGroup.position.y = closestBuilding.height + 1.5;
+				this.playerVelocity.set(0, 0, 0);
+				console.log('Found building and snapped to rooftop at height:', closestBuilding.height);
+				return;
+			} else {
+				// No building found - move to ground
+				this.playerGroup.position.y = 1;
+				this.playerOnGround = true;
+				this.isOnBuilding = false;
+				this.currentBuildingHeight = 0;
+				this.playerVelocity.set(0, 0, 0);
+				console.log('No building found - moved player to ground level');
+				return;
+			}
+		}
+		
+		// If stuck underground, move to ground
+		if (this.playerGroup.position.y < 0) {
+			this.playerGroup.position.y = 1;
+			this.playerOnGround = true;
+			this.playerVelocity.set(0, 0, 0);
+			console.log('Moved player to ground level');
+			return;
+		}
+		
+		// If stuck in air, move to ground
+		if (!this.playerOnGround && this.playerGroup.position.y > 5) {
+			this.playerGroup.position.y = 1;
+			this.playerOnGround = true;
+			this.playerVelocity.set(0, 0, 0);
+			console.log('Moved player to ground level');
+			return;
+		}
+		
+		// GENERAL UNSTUCK - If player is at ground level but still stuck, force move to safe position
+		if (this.playerGroup.position.y <= 2 && this.playerOnGround) {
+			console.log('Player at ground level but stuck - forcing move to safe position');
+			
+			// Try to find a safe position away from buildings
+			let safePosition = new THREE.Vector3(0, 1, 0); // Default to center
+			
+			// Check if we're near any buildings and move away from them
+			let totalDirection = new THREE.Vector3(0, 0, 0);
+			let buildingCount = 0;
+			
+			for (const building of this.buildings) {
+				const buildingPos = building.mesh.position;
+				const distance = this.playerGroup.position.distanceTo(buildingPos);
+				
+				if (distance < 10) { // Within 10 units of a building
+					const awayDirection = this.playerGroup.position.clone().sub(buildingPos).normalize();
+					totalDirection.add(awayDirection);
+					buildingCount++;
+				}
+			}
+			
+			if (buildingCount > 0) {
+				// Move away from buildings
+				totalDirection.divideScalar(buildingCount).normalize();
+				safePosition = this.playerGroup.position.clone().add(totalDirection.multiplyScalar(8));
+				safePosition.y = 1;
+			} else {
+				// No nearby buildings, move to a random safe position
+				safePosition = new THREE.Vector3(
+					(Math.random() - 0.5) * 20, // Random X within 20 units
+					1, // Ground level
+					(Math.random() - 0.5) * 20  // Random Z within 20 units
+				);
+			}
+			
+			// Ensure position is within map bounds
+			safePosition.x = Math.max(-this.mapBounds, Math.min(this.mapBounds, safePosition.x));
+			safePosition.z = Math.max(-this.mapBounds, Math.min(this.mapBounds, safePosition.z));
+			
+			// Move player to safe position
+			this.playerGroup.position.copy(safePosition);
+			this.playerOnGround = true;
+			this.isOnBuilding = false;
+			this.currentBuildingHeight = 0;
+			this.playerVelocity.set(0, 0, 0);
+			
+			console.log('Forced move to safe position:', safePosition.x.toFixed(2), safePosition.y.toFixed(2), safePosition.z.toFixed(2));
+			return;
+		}
+		
+		console.log('No unstuck action needed');
+	}
+
+	private addBuildingIndicator(): void {
+		// Remove existing indicator
+		if (this.buildingIndicator) {
+			this.scene.remove(this.buildingIndicator);
+		}
+		
+		// Create new indicator
+		const indicatorGeometry = new THREE.RingGeometry(0.8, 1.2, 8);
+		const indicatorMaterial = new THREE.MeshBasicMaterial({ 
+			color: 0x00ff00,
+			transparent: true,
+			opacity: 0.7,
+			side: THREE.DoubleSide
+		});
+		this.buildingIndicator = new THREE.Mesh(indicatorGeometry, indicatorMaterial);
+		this.buildingIndicator.position.copy(this.playerGroup.position);
+		this.buildingIndicator.position.y += 0.1;
+		this.buildingIndicator.rotation.x = -Math.PI / 2;
+		this.scene.add(this.buildingIndicator);
+		
+		// Animate the indicator
+		this.animateBuildingIndicator();
+	}
+	
+	private animateBuildingIndicator(): void {
+		if (!this.buildingIndicator) return;
+		
+		const time = this.clock.getElapsedTime();
+		this.buildingIndicator.position.copy(this.playerGroup.position);
+		this.buildingIndicator.position.y += 0.1;
+		this.buildingIndicator.rotation.z = time * 2;
+		
+		requestAnimationFrame(() => this.animateBuildingIndicator());
+	}
+	
+	private removeBuildingIndicator(): void {
+		if (this.buildingIndicator) {
+			this.scene.remove(this.buildingIndicator);
+			this.buildingIndicator = null;
+		}
+	}
+	
+	private checkForStuckPlayer(delta: number): void {
+		// Skip if player doesn't exist
+		if (!this.playerGroup) return;
+		
+		// Skip stuck detection during climbing - climbing has its own stuck detection
+		if (this.isClimbingLadder) {
+			return;
+		}
+		
+		// Skip stuck detection if player is actively moving (has input)
+		const hasInput = this.keys.up || this.keys.down || this.keys.left || this.keys.right || this.keys.jump;
+		if (hasInput) {
+			this.stuckTimer = 0;
+			this.lastPlayerPosition.copy(this.playerGroup.position.clone());
+			return;
+		}
+		
+		// Skip stuck detection if player is on a building and not moving (normal behavior)
+		if (this.isOnBuilding && this.currentBuildingHeight > 0) {
+			this.stuckTimer = 0;
+			this.lastPlayerPosition.copy(this.playerGroup.position.clone());
+			return;
+		}
+		
+		// Skip stuck detection during post-climbing grace period
+		if (this.postClimbingGracePeriod > 0) {
+			this.stuckTimer = 0;
+			this.lastPlayerPosition.copy(this.playerGroup.position.clone());
+			return;
+		}
+		
+		// Update grace period after climbing
+		if (this.postClimbingGracePeriod > 0) {
+			this.postClimbingGracePeriod -= delta;
+		}
+		
+		// Calculate distance moved since last frame
+		const currentPosition = this.playerGroup.position.clone();
+		const distanceMoved = this.lastPlayerPosition.distanceTo(currentPosition);
+		
+		// IMPROVED stuck detection - only trigger if player is actually stuck in a problematic position
+		if (distanceMoved < this.stuckThreshold) {
+			this.stuckTimer += delta;
+			
+			// Log stuck detection
+			if (this.stuckTimer > 0.5 && this.stuckTimer < 0.6) {
+				console.warn(`Player appears to be stuck! Position: ${currentPosition.x.toFixed(2)}, ${currentPosition.y.toFixed(2)}, ${currentPosition.z.toFixed(2)}`);
+			}
+			
+			// Auto-unstuck after max time, but only if player is in a problematic position
+			if (this.stuckTimer > this.maxStuckTime) {
+				// Check if player is actually in a problematic position before auto-unstucking
+				const isProblematicPosition = this.isPlayerInProblematicPosition(currentPosition);
+				
+				if (isProblematicPosition) {
+					console.warn('Auto-unstuck triggered! Moving player to safe position.');
+					this.autoUnstuck();
+					this.stuckTimer = 0;
+				} else {
+					// Player is stuck but in a safe position (like standing on a building), don't auto-unstuck
+					console.log('Player stuck but in safe position - not auto-unstucking');
+					this.stuckTimer = 0; // Reset timer to prevent spam
+				}
+			}
+		} else {
+			// Player is moving, reset stuck timer
+			this.stuckTimer = 0;
+		}
+		
+		// Update last position for next frame
+		this.lastPlayerPosition.copy(currentPosition);
+	}
+	
+	private isPlayerInProblematicPosition(position: THREE.Vector3): boolean {
+		// Check if player is in a position that requires auto-unstucking
+		
+		// 1. Player is underground
+		if (position.y < 0) {
+			return true;
+		}
+		
+		// 2. Player is stuck in air (high up but not on a building)
+		if (position.y > 10 && !this.isOnBuilding) {
+			return true;
+		}
+		
+		// 3. Player is on a building but stuck in a wall or invalid position
+		if (this.isOnBuilding && this.currentBuildingHeight > 0) {
+			const expectedHeight = this.currentBuildingHeight + 1.5;
+			const heightDifference = Math.abs(position.y - expectedHeight);
+			
+			// Only consider it problematic if player is significantly off the building surface
+			if (heightDifference > 5) {
+				return true;
+			}
+		}
+		
+		// 4. Player is at ground level but not near any building (might be stuck in geometry)
+		if (position.y <= 2) {
+			// Check if player is near any building
+			let nearBuilding = false;
+			for (const building of this.buildings) {
+				const distance = position.distanceTo(building.mesh.position);
+				if (distance < 20) { // Increased to 20 units - more generous
+					nearBuilding = true;
+					break;
+				}
+			}
+			
+			// If not near any building and at ground level, might be stuck
+			// But only if they're not moving (velocity is very low)
+			if (!nearBuilding && this.playerVelocity.length() < 0.1) {
+				return true;
+			}
+		}
+		
+		// 5. Player is on a building but at wrong height (more than 5 units off - more lenient)
+		if (this.isOnBuilding && this.currentBuildingHeight > 0) {
+			const expectedHeight = this.currentBuildingHeight + 1.5;
+			const heightDifference = Math.abs(position.y - expectedHeight);
+			if (heightDifference > 5) { // Increased from 3 to 5 units
+				return true;
+			}
+		}
+		
+		// 6. Player is outside map bounds
+		if (Math.abs(position.x) > this.mapBounds || Math.abs(position.z) > this.mapBounds) {
+			return true;
+		}
+		
+		// Player is in a safe position
+		return false;
+	}
+	
+	private autoUnstuck(): void {
+		if (!this.playerGroup) return;
+		
+		const currentPos = this.playerGroup.position.clone();
+		console.log(`Auto-unstuck: Moving from ${currentPos.x.toFixed(2)}, ${currentPos.y.toFixed(2)}, ${currentPos.z.toFixed(2)}`);
+		
+		// Try to find a safe position
+		let safePosition = null;
+		
+		// IMPROVED: Check if we're near a building and can land on it (more generous detection)
+		this.buildings.forEach(building => {
+			const buildingPos = building.mesh.position;
+			const distance = currentPos.distanceTo(buildingPos);
+			const buildingTop = building.height;
+			
+			// More generous detection for landing on buildings
+			if (distance < 10 && currentPos.y > buildingTop - 3 && currentPos.y < buildingTop + 5) {
+				// Land on this building
+				safePosition = new THREE.Vector3(
+					buildingPos.x + (Math.random() - 0.5) * 3, // Slightly more random position on building
+					buildingTop + 1.5,
+					buildingPos.z + (Math.random() - 0.5) * 3
+				);
+			}
+		});
+		
+		// If no building found, try to find a safe ground position away from buildings
+		if (!safePosition) {
+			// If player is at ground level, move away from nearby buildings
+			if (currentPos.y <= 2) {
+				let totalDirection = new THREE.Vector3(0, 0, 0);
+				let buildingCount = 0;
+				
+				for (const building of this.buildings) {
+					const buildingPos = building.mesh.position;
+					const distance = currentPos.distanceTo(buildingPos);
+					
+					if (distance < 8) { // Within 8 units of a building
+						const awayDirection = currentPos.clone().sub(buildingPos).normalize();
+						totalDirection.add(awayDirection);
+						buildingCount++;
+					}
+				}
+				
+				if (buildingCount > 0) {
+					// Move away from buildings
+					totalDirection.divideScalar(buildingCount).normalize();
+					safePosition = currentPos.clone().add(totalDirection.multiplyScalar(6));
+					safePosition.y = 1;
+				} else {
+					// No nearby buildings, move to a random safe position
+					safePosition = new THREE.Vector3(
+						(Math.random() - 0.5) * 20, // Random X within 20 units
+						1, // Ground level
+						(Math.random() - 0.5) * 20  // Random Z within 20 units
+					);
+				}
+			} else {
+				// Player is in air, move to ground level
+				safePosition = new THREE.Vector3(
+					currentPos.x + (Math.random() - 0.5) * 4, // Random position near current
+					1, // Ground level
+					currentPos.z + (Math.random() - 0.5) * 4
+				);
+			}
+		}
+		
+		// Ensure position is within map bounds
+		safePosition.x = Math.max(-this.mapBounds, Math.min(this.mapBounds, safePosition.x));
+		safePosition.z = Math.max(-this.mapBounds, Math.min(this.mapBounds, safePosition.z));
+		
+		// Move player to safe position
+		this.playerGroup.position.copy(safePosition);
+		this.playerVelocity.set(0, 0, 0);
+		this.playerOnGround = true;
+		
+		// IMPROVED: Update building state based on final position
+		if (safePosition.y <= 2) {
+			this.isOnBuilding = false;
+			this.currentBuildingHeight = 0;
+			this.removeBuildingIndicator();
+		} else {
+			// Player is on a building, update building state
+			this.isOnBuilding = true;
+			// Find the building height for this position
+			let closestBuilding: Building | null = null;
+			let minDist = Infinity;
+			for (const building of this.buildings) {
+				const dist = safePosition.distanceTo(building.mesh.position);
+				if (dist < minDist) {
+					minDist = dist;
+					closestBuilding = building;
+				}
+			}
+			if (closestBuilding) {
+				this.currentBuildingHeight = closestBuilding.height;
+			}
+		}
+		
+		// Set grace period after auto-unstuck to prevent immediate re-triggering
+		this.postClimbingGracePeriod = 3.0; // Increased from 2.0 to 3.0 seconds
+		
+		console.log(`Auto-unstuck: Moved to ${safePosition.x.toFixed(2)}, ${safePosition.y.toFixed(2)}, ${safePosition.z.toFixed(2)}`);
+	}
+
+	private emergencyUnstuck(ladderPos: THREE.Vector3): void {
+		// Move player away from ladder
+		this.playerGroup.position.x = ladderPos.x + 2;
+		this.playerGroup.position.z = ladderPos.z;
+
+		// Find the closest building under the player with improved detection
+		let closestBuilding: Building | null = null;
+		let minDist = Infinity;
+		for (const building of this.buildings) {
+			const dist = this.playerGroup.position.distanceTo(building.mesh.position);
+			if (dist < minDist) {
+				minDist = dist;
+				closestBuilding = building;
+			}
+		}
+		
+		// Improved building detection logic (same as finishClimbing)
+		if (closestBuilding) {
+			console.log('Emergency unstuck - closest building at distance:', minDist, 'height:', closestBuilding.height);
+			
+			// If player is high up (> 5 units), they're definitely on a building
+			if (this.playerGroup.position.y > 5) {
+				this.isOnBuilding = true;
+				this.currentBuildingHeight = closestBuilding.height;
+				this.playerGroup.position.y = closestBuilding.height + 1.5;
+				this.playerVelocity.y = 0;
+				console.log('Emergency unstuck - player high up, snapped to rooftop at height', closestBuilding.height);
+			}
+			// If player is close to building center (within 8 units), they're on the building
+			else if (minDist < 8) {
+				this.isOnBuilding = true;
+				this.currentBuildingHeight = closestBuilding.height;
+				this.playerGroup.position.y = closestBuilding.height + 1.5;
+				this.playerVelocity.y = 0;
+				console.log('Emergency unstuck - player close to building, snapped to rooftop at height', closestBuilding.height);
+			}
+			// If player is at ground level, they're on the ground
+			else {
+				this.isOnBuilding = false;
+				this.currentBuildingHeight = 0;
+				this.playerGroup.position.y = 1;
+				console.log('Emergency unstuck - player at ground level, set to ground');
+			}
+		} else {
+			// No building found - treat as ground
+			this.isOnBuilding = false;
+			this.currentBuildingHeight = 0;
+			this.playerGroup.position.y = 1;
+			console.log('Emergency unstuck - no building found, set to ground');
+		}
+		
+		this.isClimbingLadder = false;
+		this.ladderClimbProgress = 0;
+		this.nearLadder = false;
+		this.currentLadder = null;
+		this.playerOnGround = true;
+		this.playerVelocity.set(0, 0, 0);
+
+		// Hide ladder indicator
+		this.hideLadderIndicator();
+
+		console.log('Emergency unstuck completed - player moved to safe position at height:', this.playerGroup.position.y);
+		console.log('Building height set to:', this.currentBuildingHeight);
+	}
+
+	// Add this method to the GameEngine class
+	private createBench(x: number, z: number): void {
+		// Bench seat
+		const seatGeometry = new THREE.BoxGeometry(1.5, 0.2, 0.4);
+		const seatMaterial = new THREE.MeshLambertMaterial({ color: 0x8B4513 });
+		const seat = new THREE.Mesh(seatGeometry, seatMaterial);
+		seat.position.set(x, 0.6, z);
+		seat.castShadow = true;
+		this.scene.add(seat);
+
+		// Bench back
+		const backGeometry = new THREE.BoxGeometry(1.5, 0.8, 0.1);
+		const backMaterial = new THREE.MeshLambertMaterial({ color: 0x8B4513 });
+		const back = new THREE.Mesh(backGeometry, backMaterial);
+		back.position.set(x, 1, z - 0.15);
+		back.castShadow = true;
+		this.scene.add(back);
+
+		// Bench legs
+		const legGeometry = new THREE.BoxGeometry(0.1, 0.6, 0.1);
+		const legMaterial = new THREE.MeshLambertMaterial({ color: 0x444444 });
+		const leg1 = new THREE.Mesh(legGeometry, legMaterial);
+		leg1.position.set(x - 0.6, 0.3, z);
+		leg1.castShadow = true;
+		this.scene.add(leg1);
+		const leg2 = new THREE.Mesh(legGeometry, legMaterial);
+		leg2.position.set(x + 0.6, 0.3, z);
+		leg2.castShadow = true;
+		this.scene.add(leg2);
+	}
+
+	// Add this method to the GameEngine class
+	public getGameState(): GameState {
+		return this.gameState;
+	}
+
+	// Add these missing methods to the GameEngine class
+	public getPointerLockStatus(): boolean {
+		return this.isPointerLocked;
 	}
 
 	private animate(): void {
@@ -2012,6 +3511,19 @@ export class GameEngine {
 		if (this.attackCooldown > 0) {
 			this.attackCooldown -= delta;
 		}
+		
+		// Update damage animation
+		if (this.isTakingDamage) {
+			this.damageAnimationTimer -= delta;
+			if (this.damageAnimationTimer <= 0) {
+				this.isTakingDamage = false;
+				// Reset player visual appearance
+				this.resetPlayerVisualEffect();
+			} else {
+				// Visual feedback during damage animation
+				this.updateDamageVisualEffect();
+			}
+		}
 
 		// Update game time and difficulty
 		this.gameTime += delta;
@@ -2023,18 +3535,24 @@ export class GameEngine {
 
 		// CLIMBING STATE - Completely isolated from other systems
 		if (this.isClimbingLadder) {
+			// Safety check - ensure climbing state is valid
+			if (!this.currentLadder || this.ladderClimbTarget <= 0) {
+				console.warn('Invalid climbing state detected in animation loop - forcing stop');
+				this.stopClimbing();
+				this.finishClimbing();
+				return;
+			}
+			
 			// Only update climbing logic and camera during climbing
-			if (this.currentLadder) {
-				// Get the ladder position (should be at x + 3.5 from building)
-				const ladderPos = this.currentLadder.position;
-				
-				// Continue climbing only if Space is held
-				if (this.keys.jump) {
-					this.continueClimbing(delta, ladderPos);
-				} else {
-					// Stop climbing if Space is released
-					this.stopClimbing();
-				}
+			// Get the ladder position (should be at x + 3.5 from building)
+			const ladderPos = this.currentLadder.position;
+			
+			// Continue climbing only if Space is held
+			if (this.keys.jump) {
+				this.continueClimbing(delta, ladderPos);
+			} else {
+				// Stop climbing if Space is released
+				this.stopClimbing();
 			}
 			
 			// Update camera during climbing
@@ -2043,11 +3561,10 @@ export class GameEngine {
 			// Update climbing animations only
 			this.updatePlayerAnimation(delta);
 			
-			// Safety check for stuck climbing
+			// Safety check for stuck climbing (but NOT general stuck detection during climbing)
 			this.checkForStuckClimbing();
 			
-			// Anti-stuck monitoring
-			this.checkForStuckPlayer(delta);
+			// DO NOT run general stuck detection during climbing - it interferes with climbing completion
 			
 		} else {
 			// NORMAL GAME STATE - All systems active
@@ -2172,20 +3689,13 @@ export class GameEngine {
 		
 		// Reset anti-stuck system
 		this.stuckTimer = 0;
+		this.postClimbingGracePeriod = 0;
 		this.lastPlayerPosition.copy(this.playerGroup.position);
 
 		// Start animation loop
 		if (!this.animationId) {
 			this.animate();
 		}
-	}
-
-	public getGameState(): GameState {
-		return this.gameState;
-	}
-
-	public getPointerLockStatus(): boolean {
-		return this.isPointerLocked;
 	}
 
 	public destroy(): void {
@@ -2201,14 +3711,20 @@ export class GameEngine {
 	}
 
 	private handleInput(): void {
-		// Handle attack input
-		if (this.keys.attack) {
+		// Handle attack input with proper state management
+		// Allow attack even when on buildings
+		if (this.keys.attack && !this.isAttacking && this.attackCooldown <= 0) {
+			console.log('Attack triggered - isOnBuilding:', this.isOnBuilding, 'currentBuildingHeight:', this.currentBuildingHeight);
 			this.attack();
+			// Reset attack key to prevent repeated triggering
+			this.keys.attack = false;
 		}
 		
 		// Emergency unstuck key (R key)
 		if (this.keys.r) {
 			this.manualUnstuck();
+			// Reset R key to prevent repeated triggering
+			this.keys.r = false;
 		}
 	}
 
@@ -2304,38 +3820,6 @@ export class GameEngine {
 		rightArm.position.set(0.4, 0.3, 0);
 		rightArm.rotation.z = -0.5;
 		zombieGroup.add(rightArm);
-	}
-
-	private createBench(x: number, z: number): void {
-		// Bench seat
-		const seatGeometry = new THREE.BoxGeometry(1.5, 0.2, 0.4);
-		const seatMaterial = new THREE.MeshLambertMaterial({ color: 0x8B4513 });
-		const seat = new THREE.Mesh(seatGeometry, seatMaterial);
-		seat.position.set(x, 0.6, z);
-		seat.castShadow = true;
-		this.scene.add(seat);
-
-		// Bench back
-		const backGeometry = new THREE.BoxGeometry(1.5, 0.8, 0.1);
-		const backMaterial = new THREE.MeshLambertMaterial({ color: 0x8B4513 });
-		const back = new THREE.Mesh(backGeometry, backMaterial);
-		back.position.set(x, 1, z - 0.15);
-		back.castShadow = true;
-		this.scene.add(back);
-
-		// Bench legs
-		const legGeometry = new THREE.BoxGeometry(0.1, 0.6, 0.1);
-		const legMaterial = new THREE.MeshLambertMaterial({ color: 0x444444 });
-		
-		const leg1 = new THREE.Mesh(legGeometry, legMaterial);
-		leg1.position.set(x - 0.6, 0.3, z);
-		leg1.castShadow = true;
-		this.scene.add(leg1);
-		
-		const leg2 = new THREE.Mesh(legGeometry, legMaterial);
-		leg2.position.set(x + 0.6, 0.3, z);
-		leg2.castShadow = true;
-		this.scene.add(leg2);
 	}
 
 	private spawnItem(): void {
@@ -2524,199 +4008,4 @@ export class GameEngine {
 		}
 	}
 
-	private emergencyUnstuck(ladderPos: THREE.Vector3): void {
-		// Force finish climbing by setting player to target height
-		this.playerGroup.position.y = this.ladderClimbTarget;
-		this.playerGroup.position.x = ladderPos.x + 2; // Move away from ladder
-		this.playerGroup.position.z = ladderPos.z;
-		
-		// Reset all climbing state
-		this.isClimbingLadder = false;
-		this.ladderClimbProgress = 0;
-		this.nearLadder = false;
-		this.currentLadder = null;
-		
-		// Re-enable physics
-		this.playerOnGround = true;
-		this.playerVelocity.set(0, 0, 0);
-		this.isOnBuilding = true;
-		this.currentBuildingHeight = this.ladderClimbTarget - 2;
-		
-		// Hide ladder indicator
-		this.hideLadderIndicator();
-		
-		console.log('Emergency unstuck completed - player moved to safe position');
-	}
-
-	private checkForStuckClimbing(): void {
-		// Check if player is stuck in a building
-		if (this.isClimbingLadder && this.currentLadder && this.playerGroup.position.y < this.currentBuildingHeight) {
-			console.warn('Player is stuck in a building - emergency unstuck');
-			this.emergencyUnstuck(this.currentLadder.position);
-		}
-	}
-
-	private manualUnstuck(): void {
-		console.log('Manual unstuck requested');
-		
-		// If climbing, force finish climbing
-		if (this.isClimbingLadder && this.currentLadder) {
-			this.emergencyUnstuck(this.currentLadder.position);
-			return;
-		}
-		
-		// If stuck in a building, move to ground
-		if (this.isOnBuilding && this.playerGroup.position.y > 10) {
-			this.playerGroup.position.y = 1;
-			this.playerOnGround = true;
-			this.isOnBuilding = false;
-			this.currentBuildingHeight = 0;
-			this.playerVelocity.set(0, 0, 0);
-			console.log('Moved player to ground level');
-			return;
-		}
-		
-		// If stuck underground, move to ground
-		if (this.playerGroup.position.y < 0) {
-			this.playerGroup.position.y = 1;
-			this.playerOnGround = true;
-			this.playerVelocity.set(0, 0, 0);
-			console.log('Moved player to ground level');
-			return;
-		}
-		
-		// If stuck in air, move to ground
-		if (!this.playerOnGround && this.playerGroup.position.y > 5) {
-			this.playerGroup.position.y = 1;
-			this.playerOnGround = true;
-			this.playerVelocity.set(0, 0, 0);
-			console.log('Moved player to ground level');
-			return;
-		}
-		
-		console.log('No unstuck action needed');
-	}
-
-	private addBuildingIndicator(): void {
-		// Remove existing indicator
-		if (this.buildingIndicator) {
-			this.scene.remove(this.buildingIndicator);
-		}
-		
-		// Create new indicator
-		const indicatorGeometry = new THREE.RingGeometry(0.8, 1.2, 8);
-		const indicatorMaterial = new THREE.MeshBasicMaterial({ 
-			color: 0x00ff00,
-			transparent: true,
-			opacity: 0.7,
-			side: THREE.DoubleSide
-		});
-		this.buildingIndicator = new THREE.Mesh(indicatorGeometry, indicatorMaterial);
-		this.buildingIndicator.position.copy(this.playerGroup.position);
-		this.buildingIndicator.position.y += 0.1;
-		this.buildingIndicator.rotation.x = -Math.PI / 2;
-		this.scene.add(this.buildingIndicator);
-		
-		// Animate the indicator
-		this.animateBuildingIndicator();
-	}
-	
-	private animateBuildingIndicator(): void {
-		if (!this.buildingIndicator) return;
-		
-		const time = this.clock.getElapsedTime();
-		this.buildingIndicator.position.copy(this.playerGroup.position);
-		this.buildingIndicator.position.y += 0.1;
-		this.buildingIndicator.rotation.z = time * 2;
-		
-		requestAnimationFrame(() => this.animateBuildingIndicator());
-	}
-	
-	private removeBuildingIndicator(): void {
-		if (this.buildingIndicator) {
-			this.scene.remove(this.buildingIndicator);
-			this.buildingIndicator = null;
-		}
-	}
-	
-	private checkForStuckPlayer(delta: number): void {
-		// Skip if player doesn't exist
-		if (!this.playerGroup) return;
-		
-		// Calculate distance moved since last frame
-		const currentPosition = this.playerGroup.position.clone();
-		const distanceMoved = this.lastPlayerPosition.distanceTo(currentPosition);
-		
-		// Check if player is stuck (not moving enough)
-		if (distanceMoved < this.stuckThreshold) {
-			this.stuckTimer += delta;
-			
-			// Log stuck detection
-			if (this.stuckTimer > 0.5 && this.stuckTimer < 0.6) {
-				console.warn(`Player appears to be stuck! Position: ${currentPosition.x.toFixed(2)}, ${currentPosition.y.toFixed(2)}, ${currentPosition.z.toFixed(2)}`);
-			}
-			
-			// Auto-unstuck after max time
-			if (this.stuckTimer > this.maxStuckTime) {
-				console.warn('Auto-unstuck triggered! Moving player to safe position.');
-				this.autoUnstuck();
-				this.stuckTimer = 0;
-			}
-		} else {
-			// Player is moving, reset stuck timer
-			this.stuckTimer = 0;
-		}
-		
-		// Update last position for next frame
-		this.lastPlayerPosition.copy(currentPosition);
-	}
-	
-	private autoUnstuck(): void {
-		if (!this.playerGroup) return;
-		
-		const currentPos = this.playerGroup.position.clone();
-		console.log(`Auto-unstuck: Moving from ${currentPos.x.toFixed(2)}, ${currentPos.y.toFixed(2)}, ${currentPos.z.toFixed(2)}`);
-		
-		// Try to find a safe position
-		let safePosition = null;
-		
-		// Check if we're near a building and can land on it
-		this.buildings.forEach(building => {
-			const buildingPos = building.mesh.position;
-			const distance = currentPos.distanceTo(buildingPos);
-			const buildingTop = building.height;
-			
-			if (distance < 6 && currentPos.y > buildingTop - 2 && currentPos.y < buildingTop + 3) {
-				// Land on this building
-				safePosition = new THREE.Vector3(
-					buildingPos.x + (Math.random() - 0.5) * 2, // Random position on building
-					buildingTop + 1.5,
-					buildingPos.z + (Math.random() - 0.5) * 2
-				);
-			}
-		});
-		
-		// If no building found, move to ground level
-		if (!safePosition) {
-			safePosition = new THREE.Vector3(
-				currentPos.x + (Math.random() - 0.5) * 4, // Random position near current
-				1, // Ground level
-				currentPos.z + (Math.random() - 0.5) * 4
-			);
-		}
-		
-		// Move player to safe position
-		this.playerGroup.position.copy(safePosition);
-		this.playerVelocity.set(0, 0, 0);
-		this.playerOnGround = true;
-		
-		// Reset building state if we moved to ground
-		if (safePosition.y <= 2) {
-			this.isOnBuilding = false;
-			this.currentBuildingHeight = 0;
-			this.removeBuildingIndicator();
-		}
-		
-		console.log(`Auto-unstuck: Moved to ${safePosition.x.toFixed(2)}, ${safePosition.y.toFixed(2)}, ${safePosition.z.toFixed(2)}`);
-	}
 } 
